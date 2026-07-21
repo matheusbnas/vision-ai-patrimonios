@@ -1,24 +1,45 @@
-# Environment
+# ─── Environment ────────────────────────────────────────────────
 .env
 .venv/
-*.env/
+backend/.env
+backend/.venv/
 
-# Python
+# ─── Python ─────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
 
-# Cache (JWT tokens, camera data)
+# ─── Node / Frontend ────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# ─── Modelos de IA (baixar sob demanda) ────────────────────────
+*.pt
+*.pth
+backend/models_cache/
+
+# ─── Cache (JWT tokens, camera data) ───────────────────────────
 cache/
+backend/cache/
 !.gitkeep
 
-# Streamlit
+# ─── Streamlit ──────────────────────────────────────────────────
 .streamlit/
 
-# IDE
+# ─── IDE ────────────────────────────────────────────────────────
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# OS
+# ─── OS ─────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# ─── Logs ───────────────────────────────────────────────────────
+*.log
+
+# ─── Outros ─────────────────────────────────────────────────────
+package-lock.json

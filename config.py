@@ -9,14 +9,14 @@ load_dotenv()
 
 # API Configuration
 API_BASE_URL = os.getenv("API_BASE_URL", "http://10.50.3.96:8000")
-API_KEY = os.getenv("API_KEY", "co-cbf297ece46ab97c7601b56cf2a8c379")
-API_EMAIL = os.getenv("API_EMAIL", "planejamentocor@cor.rio")
-API_PASSWORD = os.getenv("API_PASSWORD", "Cor@857486")
+API_KEY = os.getenv("API_KEY", "")
+API_EMAIL = os.getenv("API_EMAIL", "")
+API_PASSWORD = os.getenv("API_PASSWORD", "")
 
 # Stream Configuration
 STREAM_BASE_URL = os.getenv("STREAM_BASE_URL", "http://10.50.3.11:5002")
 STREAM_ENDPOINT = "/stream"
-STREAM_KEY = os.getenv("STREAM_KEY", "")  # Chave JWT manual (opcional)
+STREAM_KEY = os.getenv("STREAM_KEY", "")  # Chave JWT manual (opcional, usar .env)
 
 # Paths
 BASE_DIR = Path(__file__).parent
@@ -166,6 +166,7 @@ PATRIMONIOS = [
         "emoji": "🧓",
         "latitude": -22.9500,
         "longitude": -43.1850,
+        "camera_codes": ["003352"],
     },
     {
         "id": 2,
@@ -176,6 +177,7 @@ PATRIMONIOS = [
         "emoji": "✊🏿",
         "latitude": -22.8975,
         "longitude": -43.2150,
+        "camera_codes": ["001963", "001962"],
     },
     {
         "id": 3,
@@ -186,76 +188,94 @@ PATRIMONIOS = [
         "emoji": "🎬",
         "latitude": -22.9565,
         "longitude": -43.2830,
+        "camera_codes": ["007950"],
     },
     {
         "id": 4,
         "nome": "Cazuza",
         "descricao": "Estátua de Cazuza — Rua Dias Ferreira, Leblon",
-        "bairro": "Leblon",
-        "categoria": "Personalidade / Música",
+        "bairro": "Leblon",        "endereco": "Rua Dias Ferreira, 12 - Leblon",        "categoria": "Personalidade / Música",
         "emoji": "🎤",
         "latitude": -22.9848,
         "longitude": -43.2200,
+        "camera_codes": [],
+        "observacao": "Sem câmera voltada diretamente para o monumento",
     },
     {
         "id": 5,
         "nome": "Ayrton Senna",
         "descricao": "Estátua de Ayrton Senna — Avenida Atlântica, Copacabana",
         "bairro": "Copacabana",
+        "endereco": "Av. Atlântica x R. Rodolfo Dantas - Copacabana",
         "categoria": "Personalidade / Esporte",
         "emoji": "🏎️",
-        "latitude": -22.9850,
-        "longitude": -43.1880,
+        "latitude": -22.9675,
+        "longitude": -43.1784,
+        "camera_codes": ["003696"],
+        "observacao": "Câmera 3696 da Av. Atlântica — não é exclusiva do monumento",
     },
     {
         "id": 6,
         "nome": "Curumim",
-        "descricao": "Monumento Curumim — Lagoa Rodrigo de Freitas",
+        "descricao": "Escultura do Curumim — Av. Borges de Medeiros, Lagoa",
         "bairro": "Lagoa",
+        "endereco": "Av. Borges de Medeiros - Lagoa",
         "categoria": "Monumento / Cultura Indígena",
         "emoji": "🪷",
-        "latitude": -22.9715,
+        "latitude": -22.9710,
         "longitude": -43.2110,
+        "camera_codes": [],
+        "observacao": "Sem câmera voltada diretamente para o monumento",
     },
     {
         "id": 7,
         "nome": "Clarice Lispector",
-        "descricao": "Estátua de Clarice Lispector — Orla do Leme",
+        "descricao": "Estátua de Clarice Lispector — Caminho dos Pescadores, Leme",
         "bairro": "Leme",
+        "endereco": "Caminho dos Pescadores Ted Boy Marino - Leme",
         "categoria": "Personalidade / Literatura",
         "emoji": "📖",
-        "latitude": -22.9590,
-        "longitude": -43.1580,
+        "latitude": -22.9627,
+        "longitude": -43.1655,
+        "camera_codes": ["000646"],
+        "observacao": "Não é exclusiva, mas o monumento é visível pela câmera 646 (Av. Atlântica x Ponta do Leme)",
     },
     {
         "id": 8,
         "nome": "Relógio da Glória",
-        "descricao": "Relógio da Glória — Bairro da Glória",
-        "bairro": "Glória",
-        "categoria": "Patrimônio Histórico / Arquitetura",
+        "descricao": "Relógio da Glória — Av. Edson Passos, Alto da Boa Vista",
+        "bairro": "Alto da Boa Vista",
+        "endereco": "Av. Edson Passos - Alto da Boa Vista",
+        "categoria": "Patrimônio Histórico",
         "emoji": "🕰️",
-        "latitude": -22.9180,
-        "longitude": -43.1740,
+        "latitude": -22.9150,
+        "longitude": -43.1720,
+        "camera_codes": [],
+        "observacao": "Sem câmera voltada diretamente para o monumento",
     },
     {
         "id": 9,
         "nome": "Princesa Isabel",
-        "descricao": "Estátua da Princesa Isabel — Avenida Princesa Isabel",
+        "descricao": "Monumento Princesa Isabel — Avenida Princesa Isabel, Copacabana",
         "bairro": "Copacabana",
+        "endereco": "Av. Princesa Isabel - Copacabana",
         "categoria": "Personalidade / História",
         "emoji": "👑",
-        "latitude": -22.9651473,
-        "longitude": -43.1735504,
+        "latitude": -22.9651,
+        "longitude": -43.1736,
+        "camera_codes": ["001175"],
     },
     {
         "id": 10,
         "nome": "Tom Jobim",
-        "descricao": "Estátua de Tom Jobim — Orla de Ipanema",
+        "descricao": "Monumento Tom Jobim — Av. Francisco Bhering, Ipanema",
         "bairro": "Ipanema",
+        "endereco": "Av. Francisco Bhering, S/N - Ipanema",
         "categoria": "Personalidade / Música",
         "emoji": "🎵",
-        "latitude": -22.987883,
-        "longitude": -43.19432,
+        "latitude": -22.9879,
+        "longitude": -43.1943,
+        "camera_codes": ["000194"],
     },
 ]
 
