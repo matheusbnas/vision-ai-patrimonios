@@ -3,9 +3,8 @@
 CO-RIO - Coordenadoria de Operações e Resiliência
 
 FastAPI backend com:
-  - YOLO para detecção de objetos
-  - Modelo Hugging Face (CNN-Transformer) para classificação de vandalismo
-  - Modelo YOLOv5 para detecção de danos estruturais
+  - Modelo Hugging Face (CNN-Transformer) KzRyan/Burglary_and_Vandalism
+  - Detecção de roubo, furto e vandalismo em patrimônios públicos
 """
 
 import os
@@ -78,15 +77,11 @@ app = FastAPI(
     
     ## Funcionalidades
     * 📹 Listagem e gerenciamento de câmeras
-    * 🔍 Detecção de objetos com YOLO
-    * 🚨 Análise de vandalismo (heurística + Hugging Face)
-    * 🏗️ Detecção de danos estruturais
+    * 🤖 Detecção de roubo/furto/vandalismo via Hugging Face
     * 📊 Dashboard com estatísticas
     
-    ## Modelos de IA
-    * **YOLO11n** — Detecção de objetos (80 classes COCO)
+    ## Modelo de IA
     * **KzRyan/Burglary_and_Vandalism** — CNN-Transformer para classificação de vandalismo
-    * **dolphinium/damaged-building-detection** — YOLOv5 para detecção de danos
     """,
     version="2.0.0",
     lifespan=lifespan,
@@ -101,24 +96,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── Tratamento Global de Erros ─────────────────────────────────
+# Impede que exceções não tratadas derrubem o servidor
+import traceback as _tb
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"❌ Erro não tratado em {request.url.path}: {exc}")
+    logger.error(_tb.format_exc())
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "detail": f"Erro interno: {str(exc)[:200]}"},
+    )
+
 # ─── Servir arquivos estáticos ──────────────────────────────────
 if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 # ─── Injeção de Dependências nas Rotas ──────────────────────────
-from app.api import auth, cameras, detection, vandalism, dashboard
+from app.api import auth, cameras, vandalism, dashboard, monitor
 
 auth.init_routes(camera_service)
 cameras.init_routes(camera_service)
-detection.init_routes(detection_service)
 vandalism.init_routes(detection_service)
+monitor.init_routes(camera_service, detection_service)
 
 # ─── Registro de Rotas ──────────────────────────────────────────
 app.include_router(auth.router)
 app.include_router(cameras.router)
-app.include_router(detection.router)
 app.include_router(vandalism.router)
 app.include_router(dashboard.router)
+app.include_router(monitor.router)
 
 
 # ─── Health Check ───────────────────────────────────────────────
@@ -144,5 +153,12 @@ if __name__ == "__main__":
         host=HOST,
         port=PORT,
         reload=DEBUG,
-        log_level="info",
+        reload_excludes=[
+            "cache/*",
+            "models_cache/*",
+            "*.lock",
+            "*.pt",
+            "*.pth",
+        ],
+        log_level="debug" if DEBUG else "info",
     )

@@ -1,8 +1,6 @@
 """
-Integração com modelos do Hugging Face para detecção de vandalismo e danos.
-Suporta:
+Integração com modelo do Hugging Face para detecção de vandalismo.
   - KzRyan/Burglary_and_Vandalism (CNN-Transformer para classificação de vídeo)
-  - dolphinium/damaged-building-detection (YOLOv5 para detecção de danos)
 """
 
 import io
@@ -21,7 +19,6 @@ from app.config import (
     HF_TOKEN,
     VANDALISM_MODEL_REPO,
     VANDALISM_MODEL_FILE,
-    DAMAGE_MODEL_REPO,
     MODELS_DIR,
 )
 
@@ -223,95 +220,3 @@ class HuggingFaceVandalismModel:
         }
 
 
-class DamageDetectionModel:
-    """
-    Wrapper para dolphinium/damaged-building-detection (YOLOv5).
-    Detecta danos estruturais em imagens de construções/monumentos.
-    """
-
-    def __init__(self):
-        self.model = None
-        self.model_loaded = False
-
-    def load_model(self) -> bool:
-        """Carrega o modelo YOLOv5 de detecção de danos"""
-        try:
-            import torch
-
-            # Carrega o modelo YOLOv5 do Hugging Face
-            model_path = self._download_model()
-            if not model_path:
-                return False
-
-            self.model = torch.hub.load(
-                "ultralytics/yolov5",
-                "custom",
-                path=model_path,
-                force_reload=False,
-            )
-            self.model.conf = 0.25
-            self.model_loaded = True
-            logger.info("Modelo de detecção de danos carregado")
-            return True
-
-        except Exception as e:
-            logger.error(f"Erro ao carregar modelo de danos: {e}")
-            return False
-
-    def _download_model(self) -> Optional[str]:
-        """Baixa os pesos do modelo do Hugging Face"""
-        try:
-            from huggingface_hub import snapshot_download
-
-            local_dir = MODELS_DIR / "damaged-building-detection"
-            if not (local_dir / "best.pt").exists():
-                logger.info("Baixando modelo de detecção de danos...")
-                snapshot_download(
-                    repo_id=DAMAGE_MODEL_REPO,
-                    local_dir=str(local_dir),
-                    token=HF_TOKEN if HF_TOKEN else None,
-                )
-
-            # Procura por arquivos .pt ou .pth
-            pt_files = list(local_dir.glob("*.pt")) + list(local_dir.glob("*.pth"))
-            if pt_files:
-                return str(pt_files[0])
-            return None
-
-        except Exception as e:
-            logger.error(f"Erro ao baixar modelo: {e}")
-            return None
-
-    def predict(self, image: np.ndarray) -> dict:
-        """
-        Detecta danos em uma imagem
-
-        Args:
-            image: Imagem numpy array (RGB)
-
-        Returns:
-            dict: Resultados da detecção
-        """
-        if not self.model_loaded:
-            return {"error": "Modelo não carregado", "detections": []}
-
-        try:
-            results = self.model(image)
-            detections = results.pandas().xyxy[0].to_dict("records")
-
-            return {
-                "detections": detections,
-                "total": len(detections),
-                "annotated": results.render()[0] if len(results) > 0 else image,
-            }
-
-        except Exception as e:
-            logger.error(f"Erro na detecção de danos: {e}")
-            return {"error": str(e), "detections": []}
-
-    def get_info(self) -> dict:
-        return {
-            "repo_id": DAMAGE_MODEL_REPO,
-            "model_loaded": self.model_loaded,
-            "pipeline_tag": "object-detection",
-        }

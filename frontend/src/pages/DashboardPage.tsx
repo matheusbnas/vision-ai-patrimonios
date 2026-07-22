@@ -135,9 +135,9 @@ export default function DashboardPage() {
             <h3 className="font-semibold">IA Integrada</h3>
           </div>
           <p className="text-sm text-blue-100 leading-relaxed">
-            Sistema utiliza YOLO para detecção de objetos + modelo CNN-Transformer 
-            do Hugging Face (KzRyan/Burglary_and_Vandalism) para classificação 
-            de vandalismo em tempo real.
+            Sistema utiliza modelo CNN-Transformer do Hugging Face 
+            (KzRyan/Burglary_and_Vandalism) para detecção de roubo, 
+            furto e vandalismo em tempo real.
           </p>
         </div>
 

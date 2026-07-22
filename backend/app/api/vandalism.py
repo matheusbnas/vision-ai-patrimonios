@@ -10,10 +10,6 @@ import numpy as np
 from fastapi import APIRouter, File, UploadFile, HTTPException, Form
 
 from app.schemas.schemas import (
-    VandalismResponse,
-    VandalismAnalysis,
-    RiskFactor,
-    VandalismAlert,
     HFInferenceRequest,
     HFInferenceResult,
     HFModelInfo,
@@ -30,52 +26,6 @@ detection_service: DetectionService = None
 def init_routes(service: DetectionService):
     global detection_service
     detection_service = service
-
-
-@router.post("/analyze", response_model=VandalismResponse)
-async def analyze_vandalism(
-    file: UploadFile = File(...),
-    camera_id: Optional[str] = Form("unknown"),
-    confidence: Optional[float] = Form(None),
-):
-    """Analisa uma imagem em busca de sinais de vandalismo"""
-    if not detection_service:
-        raise HTTPException(status_code=500, detail="Serviço não inicializado")
-
-    contents = await file.read()
-    image = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=400, detail="Imagem inválida")
-
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    # Detecta objetos primeiro
-    yolo_result = detection_service.yolo_detector.detect(image, confidence)
-    objects = yolo_result.get("objects", [])
-
-    # Analisa vandalismo
-    analysis = detection_service.vandalism_detector.analyze(
-        objects, camera_id, confidence
-    )
-
-    return VandalismResponse(
-        success=True,
-        analysis=VandalismAnalysis(
-            risk_score=analysis.get("risk_score", 0),
-            risk_level=analysis.get("risk_level", "BAIXO"),
-            risk_factors=[
-                RiskFactor(**rf) for rf in analysis.get("risk_factors", [])
-            ],
-            alerts=[
-                VandalismAlert(**alert) for alert in analysis.get("alerts", [])
-            ],
-            person_count=analysis.get("person_count", 0),
-            vehicle_count=analysis.get("vehicle_count", 0),
-            total_objects=analysis.get("total_objects", 0),
-            has_vandal_tools=analysis.get("has_vandal_tools", False),
-            vandal_tools=analysis.get("vandal_tools", []),
-        ),
-    )
 
 
 @router.post("/hf-predict")
@@ -99,6 +49,11 @@ async def hf_predict(
 
     if model_type == "vandalism":
         model = detection_service.hf_vandalism
+        if not model.model_loaded:
+            try:
+                model.load_model()
+            except Exception as e:
+                raise HTTPException(status_code=503, detail=f"Erro ao carregar modelo HF: {e}")
         if not model.model_loaded:
             raise HTTPException(status_code=503, detail="Modelo HF não carregado")
 
@@ -133,26 +88,6 @@ async def hf_predict(
             processing_time_ms=round(elapsed, 2),
         )
 
-    elif model_type == "damage":
-        model = detection_service.hf_damage
-        if not model.model_loaded:
-            raise HTTPException(status_code=503, detail="Modelo de danos não carregado")
-
-        image = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
-        if image is None:
-            raise HTTPException(status_code=400, detail="Imagem inválida")
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        result = model.predict(image)
-        elapsed = (time.time() - start) * 1000
-
-        return HFInferenceResult(
-            success=True,
-            predictions=result,
-            model_used="dolphinium/damaged-building-detection",
-            processing_time_ms=round(elapsed, 2),
-        )
-
     raise HTTPException(status_code=400, detail=f"Tipo de modelo inválido: {model_type}")
 
 
@@ -166,6 +101,5 @@ async def hf_models_info():
         "success": True,
         "models": [
             detection_service.hf_vandalism.get_info(),
-            detection_service.hf_damage.get_info(),
         ],
     }

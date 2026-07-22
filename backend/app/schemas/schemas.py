@@ -47,63 +47,7 @@ class CameraListResponse(BaseModel):
     total: int = 0
 
 
-# ─── Detecção YOLO ───────────────────────────────────────────────
 
-class DetectedObject(BaseModel):
-    class_id: int
-    class_name: str
-    patrimony_type: str
-    confidence: float
-    bbox: list[int]
-
-
-class DetectionResult(BaseModel):
-    objects: list[DetectedObject] = []
-    total_objects: int = 0
-    counts: dict = {}
-    processing_time_ms: float = 0
-
-
-class DetectionResponse(BaseModel):
-    success: bool
-    result: Optional[DetectionResult] = None
-    error: Optional[str] = None
-
-
-# ─── Vandalismo ──────────────────────────────────────────────────
-
-class RiskFactor(BaseModel):
-    object: str
-    label: str
-    type: str
-    risk: float
-    count: int
-
-
-class VandalismAlert(BaseModel):
-    level: str  # ALTO, MODERADO
-    score: float
-    message: str
-    timestamp: float
-    camera_id: str
-
-
-class VandalismAnalysis(BaseModel):
-    risk_score: float
-    risk_level: str  # BAIXO, MODERADO, ALTO, CRÍTICO
-    risk_factors: list[RiskFactor] = []
-    alerts: list[VandalismAlert] = []
-    person_count: int = 0
-    vehicle_count: int = 0
-    total_objects: int = 0
-    has_vandal_tools: bool = False
-    vandal_tools: list[dict] = []
-
-
-class VandalismResponse(BaseModel):
-    success: bool
-    analysis: Optional[VandalismAnalysis] = None
-    error: Optional[str] = None
 
 
 # ─── Hugging Face ────────────────────────────────────────────────
@@ -156,7 +100,6 @@ class DashboardResponse(BaseModel):
     success: bool
     stats: Optional[DashboardStats] = None
     patrimonios: list[PatrimonySummary] = []
-    alertas_recentes: list[VandalismAlert] = []
 
 
 # ─── Upload ──────────────────────────────────────────────────────

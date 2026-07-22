@@ -14,7 +14,7 @@ import requests
 
 from app.config import (
     API_BASE_URL, API_KEY, API_EMAIL, API_PASSWORD,
-    STREAM_BASE_URL, STREAM_ENDPOINT, CACHE_DIR,
+    STREAM_BASE_URL, STREAM_ENDPOINT, STREAM_KEY, CACHE_DIR,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,7 +238,11 @@ class CameraService:
         return None
 
     def _get_stream_key(self) -> Optional[str]:
-        """Obtém chave de stream do servidor"""
+        """Obtém chave de stream do servidor.
+        Tenta API primeiro, fallback para STREAM_KEY do .env"""
+        # Fallback: STREAM_KEY do .env (se configurado)
+        if STREAM_KEY:
+            return STREAM_KEY
         try:
             resp = self.session.get(
                 f"{STREAM_BASE_URL}/api/stream/key",

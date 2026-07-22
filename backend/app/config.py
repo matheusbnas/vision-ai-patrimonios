@@ -37,10 +37,6 @@ PORT = int(os.getenv("PORT", "8000"))
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
 
-# ─── YOLO ────────────────────────────────────────────────────────
-YOLO_MODEL = os.getenv("YOLO_MODEL", str(BASE_DIR.parent / "yolo11n.pt"))
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
-
 # ─── Hugging Face ────────────────────────────────────────────────
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 VANDALISM_MODEL_REPO = os.getenv(
@@ -48,9 +44,6 @@ VANDALISM_MODEL_REPO = os.getenv(
 )
 VANDALISM_MODEL_FILE = os.getenv(
     "VANDALISM_MODEL_FILE", "HYBRID_CNN_TRANSFORMER_MODEL.pth"
-)
-DAMAGE_MODEL_REPO = os.getenv(
-    "DAMAGE_MODEL_REPO", "dolphinium/damaged-building-detection"
 )
 
 # ─── Mapa ────────────────────────────────────────────────────────

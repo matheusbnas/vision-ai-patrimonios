@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet'
+import MarkerClusterGroup from 'react-leaflet-cluster'
 import L from 'leaflet'
 import { api } from '../api/client'
 import type { Patrimonio } from '../types'
@@ -34,6 +35,12 @@ export default function MapaPage() {
     })
   }, [])
 
+  // Filtra apenas câmeras com coordenadas válidas
+  const camerasComCoordenadas = useMemo(
+    () => cameras.filter((c) => c.latitude && c.longitude),
+    [cameras]
+  )
+
   return (
     <div className="h-[calc(100vh-130px)] rounded-xl overflow-hidden shadow-sm border border-gray-200">
       <MapContainer
@@ -47,7 +54,7 @@ export default function MapaPage() {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {/* Marcadores de Patrimônios */}
+        {/* Marcadores de Patrimônios (sempre visíveis, sem cluster) */}
         {patrimonios.map((p) => (
           <Marker
             key={`pat-${p.id}`}
@@ -65,10 +72,14 @@ export default function MapaPage() {
           </Marker>
         ))}
 
-        {/* Marcadores de Câmeras */}
-        {cameras
-          .filter((c) => c.latitude && c.longitude)
-          .map((c, i) => (
+        {/* Câmeras agrupadas em clusters — evita lentidão com 10k marcadores */}
+        <MarkerClusterGroup
+          chunkedLoading
+          maxClusterRadius={60}
+          spiderfyOnMaxZoom={true}
+          showCoverageOnHover={false}
+        >
+          {camerasComCoordenadas.map((c, i) => (
             <Marker
               key={`cam-${i}`}
               position={[c.latitude, c.longitude]}
@@ -77,7 +88,9 @@ export default function MapaPage() {
               <Popup>
                 <div className="min-w-[150px]">
                   <p className="font-bold text-gray-800">{c.name || c.code || `Câmera #${c.id}`}</p>
-                  <p className="text-xs text-gray-500">{c.localizacao || `${c.latitude?.toFixed(4)}, ${c.longitude?.toFixed(4)}`}</p>
+                  <p className="text-xs text-gray-500">
+                    {c.localizacao || `${c.latitude?.toFixed(4)}, ${c.longitude?.toFixed(4)}`}
+                  </p>
                   {c.stream_url && (
                     <p className="text-xs text-blue-500 mt-1">📹 Link disponível</p>
                   )}
@@ -85,6 +98,7 @@ export default function MapaPage() {
               </Popup>
             </Marker>
           ))}
+        </MarkerClusterGroup>
       </MapContainer>
     </div>
   )

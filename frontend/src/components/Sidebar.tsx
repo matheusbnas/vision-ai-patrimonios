@@ -3,9 +3,9 @@ import {
   LayoutDashboard,
   Landmark,
   Map,
-  Search,
   ShieldAlert,
   Info,
+  Camera,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react'
@@ -21,8 +21,8 @@ const navItems: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={20} /> },
   { id: 'patrimonios', label: 'Patrimônios', icon: <Landmark size={20} /> },
   { id: 'mapa', label: 'Mapa', icon: <Map size={20} /> },
-  { id: 'detector', label: 'Detector', icon: <Search size={20} /> },
   { id: 'vandalismo', label: 'Antivandalismo', icon: <ShieldAlert size={20} /> },
+  { id: 'monitoramento', label: 'Monitoramento', icon: <Camera size={20} /> },
   { id: 'sobre', label: 'Sobre', icon: <Info size={20} /> },
 ]
 

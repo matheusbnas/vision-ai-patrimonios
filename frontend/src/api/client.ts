@@ -4,12 +4,9 @@
 import axios, { AxiosInstance } from 'axios'
 import type {
   Camera,
-  DetectionResult,
-  VandalismAnalysis,
   DashboardStats,
   Patrimonio,
   HFModelInfo,
-  VandalismAlert,
 } from '../types'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
@@ -66,27 +63,56 @@ class ApiClient {
     return data
   }
 
-  // ─── Detecção ─────────────────────────────────────────────────
+  // ─── Monitoramento ao Vivo ────────────────────────────────────
 
-  async detectObjects(file: File, confidence?: number): Promise<DetectionResult> {
-    const form = new FormData()
-    form.append('file', file)
-    if (confidence) form.append('confidence', String(confidence))
-
-    const { data } = await this.http.post('/api/detect', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
-    return data.result
+  async monitorLive(code: string, confidence?: number, includeImage = true) {
+    const params: any = { include_image: includeImage }
+    if (confidence) params.confidence = confidence
+    const { data } = await this.http.get(`/api/monitor/live/${code}`, { params })
+    return data
   }
 
-  async detectFull(file: File, confidence?: number, cameraId = 'upload') {
-    const form = new FormData()
-    form.append('file', file)
-    form.append('camera_id', cameraId)
-    if (confidence) form.append('confidence', String(confidence))
+  async monitorMulti(codes: string[], confidence?: number) {
+    const params: any = { codes: codes.join(',') }
+    if (confidence) params.confidence = confidence
+    const { data } = await this.http.get('/api/monitor/multi', {
+      params,
+      timeout: 45000,  // 45s máx para processar todas as câmeras
+    })
+    return data
+  }
 
-    const { data } = await this.http.post('/api/detect/full', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+  async getStreams(codes: string[]) {
+    const { data } = await this.http.get('/api/monitor/streams', {
+      params: { codes: codes.join(',') },
+      timeout: 15000,
+    })
+    return data
+  }
+
+  // Demonstração: gera cena sintética e executa pipeline completo
+  async monitorDemo(cenario = 'depredacao', cameraCode = '001175') {
+    const { data } = await this.http.get('/api/monitor/demo', {
+      params: { cenario, camera_code: cameraCode },
+      timeout: 30000,
+    })
+    return data
+  }
+
+  // ─── Detecção de Mudanças (Antes vs Depois) ───────────────────
+
+  async detectChanges(cameraCode: string, usarDemo = true) {
+    const { data } = await this.http.get(`/api/monitor/change/${cameraCode}`, {
+      params: { usar_demo: usarDemo },
+      timeout: 30000,
+    })
+    return data
+  }
+
+  async setReference(cameraCode: string, usarDemo = true) {
+    const { data } = await this.http.post(`/api/monitor/change/${cameraCode}/reference`, null, {
+      params: { usar_demo: usarDemo },
+      timeout: 15000,
     })
     return data
   }
@@ -96,18 +122,7 @@ class ApiClient {
     return data.models
   }
 
-  // ─── Vandalismo ───────────────────────────────────────────────
-
-  async analyzeVandalism(file: File, cameraId = 'unknown'): Promise<VandalismAnalysis> {
-    const form = new FormData()
-    form.append('file', file)
-    form.append('camera_id', cameraId)
-
-    const { data } = await this.http.post('/api/vandalism/analyze', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })
-    return data.analysis
-  }
+  // ─── Vandalismo (HF Model) ────────────────────────────────────
 
   async hfPredict(file: File, modelType = 'vandalism') {
     const form = new FormData()

@@ -5,7 +5,7 @@ import Header from './components/Header'
 import DashboardPage from './pages/DashboardPage'
 import PatrimoniosPage from './pages/PatrimoniosPage'
 import MapaPage from './pages/MapaPage'
-import DetectorPage from './pages/DetectorPage'
+import MonitoramentoPage from './pages/MonitoramentoPage'
 import VandalismoPage from './pages/VandalismoPage'
 import SobrePage from './pages/SobrePage'
 import type { Page } from './types'
@@ -22,10 +22,10 @@ export default function App() {
         return <PatrimoniosPage />
       case 'mapa':
         return <MapaPage />
-      case 'detector':
-        return <DetectorPage />
       case 'vandalismo':
         return <VandalismoPage />
+      case 'monitoramento':
+        return <MonitoramentoPage />
       case 'sobre':
         return <SobrePage />
       default:

@@ -92,5 +92,6 @@ export type Page =
   | 'mapa'
   | 'detector'
   | 'vandalismo'
+  | 'monitoramento'
   | 'analise'
   | 'sobre'

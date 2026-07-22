@@ -10,26 +10,12 @@ import {
 
 const models = [
   {
-    name: 'YOLO11n',
-    source: 'Ultralytics',
-    description: 'Detecção de objetos em tempo real (80 classes COCO)',
-    icon: <Cpu size={20} />,
-  },
-  {
     name: 'KzRyan/Burglary_and_Vandalism',
     source: 'Hugging Face',
     description:
-      'CNN-Transformer Híbrido (ResNet18 + Transformer) para classificação de vandalismo em vídeos. Classes: normal, burglary, vandalism.',
+      'CNN-Transformer Híbrido (ResNet18 + Transformer) para classificação de vandalismo. Classes: normal, burglary, vandalism.',
     icon: <Brain size={20} />,
     link: 'https://huggingface.co/KzRyan/Burglary_and_Vandalism',
-  },
-  {
-    name: 'dolphinium/damaged-building-detection',
-    source: 'Hugging Face',
-    description:
-      'YOLOv5 fine-tuned no dataset RescueNet para detecção de danos estruturais em construções.',
-    icon: <Database size={20} />,
-    link: 'https://huggingface.co/dolphinium/damaged-building-detection',
   },
 ]
 
@@ -50,9 +36,9 @@ const features = [
     icon: <Brain size={20} />,
   },
   {
-    title: 'Múltiplos Modelos',
-    desc: 'YOLO para detecção, CNN-Transformer para vandalismo, YOLOv5 para danos estruturais.',
-    icon: <Database size={20} />,
+    title: 'Modelo Único Especializado',
+    desc: 'KzRyan/Burglary_and_Vandalism para detecção de roubo, furto e vandalismo.',
+    icon: <Brain size={20} />,
   },
 ]
 

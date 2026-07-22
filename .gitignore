@@ -25,8 +25,14 @@ cache/
 backend/cache/
 !.gitkeep
 
-# ─── Streamlit ──────────────────────────────────────────────────
+# ─── Streamlit (removido) ──────────────────────────────────────
 .streamlit/
+
+# ─── Arquivos de teste ─────────────────────────────────────────
+_test_*
+temp_*
+test_*.py
+!backend/test_*/
 
 # ─── IDE ────────────────────────────────────────────────────────
 .vscode/
