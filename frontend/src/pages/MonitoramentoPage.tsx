@@ -5,7 +5,6 @@ import {
   Play,
   Pause,
   AlertTriangle,
-  Brain,
   RefreshCw,
   WifiOff,
 } from 'lucide-react'
@@ -17,6 +16,7 @@ interface DetectionFrame {
   camera_name: string
   stream_url?: string
   image_base64?: string
+  snapshot_path?: string
   frame_captured?: boolean
   processing_time_ms: number
   timestamp: number
@@ -316,7 +316,6 @@ export default function MonitoramentoPage() {
                         change_regions: data.change_regions,
                         significant_changes: data.significant_changes,
                         ssim_alert_level: data.ssim_alert_level,
-                        hf_prediction: data.hf_prediction,
                         alert: data.alert || undefined,
                         alert_level: data.alert_level || 'NORMAL',
                         timestamp: Date.now() / 1000,
@@ -334,6 +333,7 @@ export default function MonitoramentoPage() {
             </button>
           </div>
         </div>
+
       </div>
 
       {/* Grid de câmeras */}
@@ -435,6 +435,25 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
+                      {/* 📸 Snapshot salvo */} 
+                      {frame?.snapshot_path && (
+                        <div className="bg-gray-50 rounded-lg p-2 flex items-center gap-2">
+                          <Camera size={14} className="text-gray-400 shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[9px] font-medium text-gray-500">📸 Snapshot salvo</p>
+                            <a
+                              href={`/${frame.snapshot_path}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[9px] text-blue-600 hover:text-blue-800 underline truncate block"
+                              title={frame.snapshot_path}
+                            >
+                              {frame.snapshot_path.split('/').pop()}
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
                       {/* SSIM: Similaridade / Mudança */}
                       {frame?.similarity_score != null && (
                         <div className="bg-blue-50 rounded-lg p-2">
@@ -472,61 +491,7 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
-                      {/* Highlight image (diferenças em vermelho) */}
-                      {frame?.highlight_image_base64 && (
-                        <div className="rounded-lg overflow-hidden border border-gray-200">
-                          <p className="text-[9px] font-semibold text-gray-500 uppercase px-2 pt-1.5 pb-0.5">
-                            🔴 Diferenças detectadas (ROI do monumento)
-                          </p>
-                          <img
-                            src={`data:image/jpeg;base64,${frame.highlight_image_base64}`}
-                            alt="Comparativo do monumento"
-                            className="w-full h-auto"
-                          />
-                        </div>
-                      )}
 
-                      {/* Predição HF */}
-                      {frame?.hf_prediction && (
-                        <div className="bg-purple-50 rounded-lg p-2">
-                          <div className="flex items-center gap-1 mb-1.5">
-                            <Brain size={12} className="text-purple-600" />
-                            <span className="text-[10px] font-semibold text-purple-700">
-                              KzRyan/Burglary_and_Vandalism
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-3 gap-2">
-                            {Object.entries(frame.hf_prediction).map(([cls, prob]) => {
-                              const pct = (prob as number * 100).toFixed(0)
-                              const color = cls === 'vandalism' ? 'text-red-600' :
-                                           cls === 'burglary' ? 'text-orange-500' :
-                                           'text-green-600'
-                              const bgColor = cls === 'vandalism' ? 'bg-red-50' :
-                                             cls === 'burglary' ? 'bg-orange-50' :
-                                             'bg-green-50'
-                              return (
-                                <div key={cls} className={`${bgColor} rounded p-1.5 text-center`}>
-                                  <div className={`text-sm font-bold ${color}`}>
-                                    {pct}%
-                                  </div>
-                                  <div className="text-[9px] text-gray-500 capitalize leading-tight">
-                                    {cls === 'burglary' ? '💰 Roubo/Furto' :
-                                     cls === 'vandalism' ? '🔨 Vandalismo' :
-                                     '✅ Normal'}
-                                  </div>
-                                  <div className="w-full bg-gray-200 rounded-full h-1 mt-1">
-                                    <div className={`h-1 rounded-full ${
-                                      cls === 'vandalism' ? 'bg-red-500' :
-                                      cls === 'burglary' ? 'bg-orange-500' :
-                                      'bg-green-500'
-                                    }`} style={{ width: `${pct}%` }} />
-                                  </div>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      )}
 
                       {/* Objetos detectados pelo YOLO */}
                       {frame?.yolo_detection?.total_objects > 0 && (
@@ -546,7 +511,7 @@ export default function MonitoramentoPage() {
                       )}
 
                       {/* Mensagem vazia */}
-                      {!frame?.alert && frame?.similarity_score == null && !frame?.hf_prediction && (
+                      {!frame?.alert && frame?.similarity_score == null && (
                         <div className="text-center text-gray-400 text-[10px] py-1">
                           {frame ? 'Aguardando verificação...' : 'Aguardando primeiro scan...'}
                         </div>

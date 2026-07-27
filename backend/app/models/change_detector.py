@@ -20,11 +20,11 @@ from skimage.metrics import structural_similarity as ssim
 
 logger = logging.getLogger(__name__)
 
-# Proporção do ROI no frame (centro)
-ROI_X_START = 0.15   # 15% da largura
-ROI_X_END = 0.85     # 85% da largura
-ROI_Y_START = 0.10   # 10% da altura
-ROI_Y_END = 0.80     # 80% da altura
+# Proporção do ROI no frame (centro) — focado no monumento
+ROI_X_START = 0.20   # 20% da largura
+ROI_X_END = 0.80     # 80% da largura
+ROI_Y_START = 0.15   # 15% da altura
+ROI_Y_END = 0.75     # 75% da altura
 
 
 def extrair_roi(frame: np.ndarray) -> np.ndarray:
@@ -115,10 +115,19 @@ class ChangeDetector:
         gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_RGB2GRAY)
         gray_cur = cv2.cvtColor(current_roi, cv2.COLOR_RGB2GRAY)
 
+        # Normaliza iluminação (CLAHE) para evitar falso-positivo por luz do dia
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray_ref = clahe.apply(gray_ref)
+        gray_cur = clahe.apply(gray_cur)
+
+        # Aplica blur leve para reduzir ruído de compressão
+        gray_ref = cv2.GaussianBlur(gray_ref, (3, 3), 0)
+        gray_cur = cv2.GaussianBlur(gray_cur, (3, 3), 0)
+
         score, diff_mask = ssim(gray_ref, gray_cur, full=True, data_range=255)
         diff_mask = (1 - diff_mask).astype(np.uint8) * 255
 
-        _, thresh = cv2.threshold(diff_mask, 30, 255, cv2.THRESH_BINARY)
+        _, thresh = cv2.threshold(diff_mask, 40, 255, cv2.THRESH_BINARY)  # threshold mais alto
         kernel = np.ones((5, 5), np.uint8)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
@@ -129,11 +138,11 @@ class ChangeDetector:
         changed_pixels = int(np.sum(thresh > 0))
         change_pct = (changed_pixels / total_pixels) * 100
 
-        # Regiões de mudança significativa
+        # Regiões de mudança significativa (área mínima maior para filtrar ruído)
         changes = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > 50:
+            if area > 300:  # ignora ruídos muito pequenos
                 x, y, w, h = cv2.boundingRect(cnt)
                 changes.append({
                     "bbox": [int(x), int(y), int(x + w), int(y + h)],
@@ -218,12 +227,17 @@ class ChangeDetector:
         return self.change_history.get(camera_code, [])
 
     def _ssim_alert_level(self, change_pct: float, num_regions: int) -> str:
-        """Nível de alerta baseado na mudança SSIM"""
-        if change_pct > 10 or num_regions > 10:
+        """Nível de alerta baseado na mudança SSIM
+        
+        Thresholds mais conservadores para evitar falso-positivo:
+        - Pequenas variações de iluminação/pessoas passando são NORMAL
+        - Só alerta se houver mudança significativa e consistente no monumento
+        """
+        if change_pct > 20 or num_regions > 15:
             return "CRÍTICO"
-        if change_pct > 3 or num_regions > 3:
+        if change_pct > 8 or num_regions > 8:
             return "ALTO"
-        if change_pct > 0.5 or num_regions > 0:
+        if change_pct > 3 or num_regions > 3:
             return "MODERADO"
         return "NORMAL"
 
@@ -266,11 +280,28 @@ class ChangeDetector:
         
         - SSIM sozinho com MODERADO+ já gera alerta de mudança física
         - HF confirma se é roubo/vandalismo
-        - Se ambosalertam, nível sobe
+        - Se ambos alertam, nível sobe
+        - Se NÃO há mudança física (SSIM ≈ 100%), SUPRIME alerta HF
+          (modelo HF tende a dar falso-positivo em imagens estáticas
+          pois foi treinado para vídeo e sempre produz ~62% em qualquer frame)
         """
         # Só SSIM já indica mudança física (pichação, dano, peça quebrada)
         has_ssim_change = ssim_level in ("MODERADO", "ALTO", "CRÍTICO")
         has_hf_alert = hf_alert is not None
+
+        # ─── Se NÃO há mudança física, ignora HF completamente ─────
+        # O modelo HF (KzRyan/Burglary_and_Vandalism) é de classificação
+        # de vídeo e sempre produz ~60-62% em imagens estáticas, gerando
+        # falso-positivo. Só consideramos HF se SSIM detectou alteração.
+        if not has_ssim_change:
+            if has_hf_alert:
+                logger.debug(
+                    f"HF alert suprimido (SSIM sem mudança): "
+                    f"similarity=~{1 - change_pct/100:.4f}, "
+                    f"hf={hf_alert.get('max_probability', 0):.3f}"
+                )
+            # Sem mudança SSIM → NORMAL, mesmo que HF alerte
+            return None, "NORMAL"
 
         if has_ssim_change and has_hf_alert:
             # Ambos confirmam: alerta combinado
@@ -293,12 +324,6 @@ class ChangeDetector:
             msg = (f"⚠️ {level}: {change_pct:.1f}% do monumento alterado "
                    f"({len(changes)} região(is))")
             alert = {"level": level, "message": msg, "source": "ssim"}
-            return alert, level
-
-        if has_hf_alert:
-            # Só HF (sem mudança SSIM) — menos comum
-            level = hf_alert["level"]
-            alert = {"level": level, "message": hf_alert["message"], "source": "hf"}
             return alert, level
 
         return None, "NORMAL"

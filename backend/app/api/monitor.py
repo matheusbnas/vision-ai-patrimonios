@@ -6,7 +6,9 @@ Captura frames do stream Tixxi, processa com YOLO + HF e retorna análise.
 import base64
 import logging
 import time
+from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -17,6 +19,7 @@ from fastapi.responses import JSONResponse
 from app.services.camera_service import CameraService
 from app.services.detection_service import DetectionService
 from app.models.change_detector import ChangeDetector
+from app.config import IMAGES_DIR
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitor", tags=["Monitoramento ao Vivo"])
@@ -32,17 +35,200 @@ def init_routes(cam_svc: CameraService, det_svc: DetectionService):
     detection_service = det_svc
 
 
-def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.ndarray]:
+def _parse_mjpeg_frame(stream_url: str, timeout_sec: float = 5.0) -> Optional[np.ndarray]:
     """
-    Captura um frame de um stream MJPEG ou RTSP usando OpenCV.
+    Lê o stream MJPEG via HTTP e extrai o primeiro frame JPEG.
+    Funciona com streams multipart/x-mixed-replace (padrão de câmeras IP).
+    
+    Usa headers de navegador para evitar bloqueios.
     
     Args:
-        stream_url: URL do stream (MJPEG via HTTP ou RTSP)
+        stream_url: URL do stream MJPEG
+        timeout_sec: Tempo máximo para capturar
+        
+    Returns:
+        np.ndarray: Frame em RGB ou None se falhar
+    """
+    import io
+    import warnings
+    import requests as req
+    
+    # Suprime aviso de SSL verify=False (stream interno)
+    warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Connection": "keep-alive",
+        "Referer": stream_url.split("?")[0],
+    }
+    
+    buffer = b""
+    start = time.time()
+    
+    try:
+        with req.get(stream_url, headers=headers, stream=True,
+                     timeout=timeout_sec, verify=False) as resp:
+            if resp.status_code != 200:
+                logger.warning(f"MJPEG HTTP {resp.status_code} para {stream_url[:80]}")
+                return None
+            
+            ct = resp.headers.get("content-type", "")
+            
+            # Se for image/jpeg direto, é um frame único
+            if "image/jpeg" in ct or "image/jpg" in ct:
+                img = Image.open(io.BytesIO(resp.content))
+                return np.array(img)
+            
+            for chunk in resp.iter_content(chunk_size=16384):
+                if time.time() - start > timeout_sec:
+                    break
+                if not chunk:
+                    continue
+                buffer += chunk
+                
+                # Procura marcadores JPEG no buffer
+                start_jpeg = buffer.find(b'\xff\xd8')
+                end_jpeg = buffer.find(b'\xff\xd9')
+                
+                if start_jpeg >= 0 and end_jpeg >= 0 and end_jpeg > start_jpeg:
+                    jpeg_data = buffer[start_jpeg:end_jpeg + 2]
+                    try:
+                        img = Image.open(io.BytesIO(jpeg_data))
+                        img.verify()  # valida integridade
+                        img = Image.open(io.BytesIO(jpeg_data))
+                        return np.array(img)
+                    except Exception:
+                        # JPEG corrompido, continua procurando
+                        buffer = buffer[end_jpeg + 2:]
+                        continue
+                
+                # Se buffer crescer demais, limpa (mantém últimos 64KB)
+                if len(buffer) > 1024 * 512:  # 512KB
+                    if start_jpeg >= 0:
+                        buffer = buffer[start_jpeg:]
+                    else:
+                        buffer = buffer[-65536:]
+    except Exception as e:
+        logger.warning(f"MJPEG parser error: {e}")
+    
+    return None
+
+
+def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.ndarray]:
+    """
+    Captura um frame REAL do stream da câmera.
+    
+    O stream retorna HTML/JS renderizado no navegador (iframe).
+    A estratégia principal é usar Playwright (Chromium headless)
+    para abrir a página e fazer screenshot do que aparece.
+    
+    Args:
+        stream_url: URL do stream
         timeout_sec: Tempo máximo para capturar o frame
         
     Returns:
         np.ndarray: Frame em RGB ou None se falhar
     """
+    import io
+    from PIL import Image
+
+    # ─── Tentativa 1: Playwright (Chromium headless) ──────────────
+    # O stream é HTML/JS (exibido em iframe no frontend).
+    # Playwright renderiza a página e tira screenshot do vídeo/canvas.
+    try:
+        from playwright.sync_api import sync_playwright
+        
+        # Tenta até 2x: se falhar com 401, renova stream_url e tenta de novo
+        for tentativa in range(2):
+            current_url = stream_url
+            
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                    ],
+                )
+                context = browser.new_context(
+                    viewport={"width": 800, "height": 600},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    locale="pt-BR",
+                    bypass_csp=True,
+                )
+                page = context.new_page()
+                
+                # Monitora erros de rede (401 = token expirado)
+                token_expired = False
+                def handle_response(resp):
+                    nonlocal token_expired
+                    if resp.status == 401:
+                        token_expired = True
+                page.on('response', handle_response)
+                
+                # Navega até o stream
+                logger.info(f"Playwright: tentativa {tentativa+1}, abrindo stream...")
+                page.goto(current_url, timeout=timeout_sec * 1000,
+                          wait_until="domcontentloaded")
+                
+                # Aguarda React carregar e procurar video
+                page.wait_for_timeout(3000)
+                
+                # Se detectou 401 e é a primeira tentativa, renova token e tenta de novo
+                if token_expired and tentativa == 0:
+                    logger.info("Token expirado, renovando stream_url...")
+                    browser.close()
+                    # Tenta renovar via camera_service
+                    try:
+                        if camera_service:
+                            cam = camera_service.get_camera_by_code(
+                                stream_url.split("CODE=")[1].split("&")[0]
+                                if "CODE=" in stream_url else ""
+                            )
+                            if cam and cam.get("stream_url"):
+                                stream_url = cam["stream_url"]
+                                logger.info("Stream URL renovada!")
+                    except Exception:
+                        pass
+                    continue  # tenta de novo com nova URL
+                
+                # Tenta dar play no video via JS
+                page.evaluate("""() => {
+                    const v = document.querySelector("video");
+                    if (v) {
+                        v.muted = true;
+                        v.play().catch(() => {});
+                    }
+                }""")
+                page.wait_for_timeout(3000)
+                
+                # Screenshot
+                screenshot = page.screenshot(type="jpeg", quality=90)
+                browser.close()
+            
+            img = Image.open(io.BytesIO(screenshot))
+            frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            logger.info("✅ Playwright: frame capturado com sucesso!")
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    except Exception as e:
+        logger.warning(f"Playwright falhou: {e}")
+    
+    # ─── Tentativa 2: MJPEG HTTP streaming ──────────────────────
+    frame = _parse_mjpeg_frame(stream_url, timeout_sec)
+    if frame is not None:
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # ─── Tentativa 3: OpenCV (MJPEG/RTSP) ───────────────────────
     try:
         cap = cv2.VideoCapture(stream_url)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -57,13 +243,63 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.nda
         
         cap.release()
         
-        if frame is None:
-            return None
-        
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
+        if frame is not None:
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     except Exception as e:
-        logger.warning(f"Erro ao capturar frame do stream: {e}")
+        logger.warning(f"OpenCV não conseguiu capturar: {e}")
+    
+    # ─── Tentativa 4: requests direto ───────────────────────────
+    try:
+        import requests as req
+        resp = req.get(stream_url, timeout=timeout_sec)
+        if resp.status_code == 200:
+            img = Image.open(io.BytesIO(resp.content))
+            return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    except Exception as e:
+        logger.warning(f"Requests direto falhou: {e}")
+    
+    return None
+
+
+def save_camera_snapshot(frame: np.ndarray, camera_code: str,
+                          camera_name: str = "",
+                          label: str = "captura") -> Optional[str]:
+    """
+    Salva o frame capturado da câmera em assets/images/{camera_code}/
+    com nome padronizado: {camera_name}_{camera_code}_{label}_{timestamp}.jpg
+    
+    Args:
+        frame: Imagem numpy (RGB)
+        camera_code: Código da câmera
+        camera_name: Nome do monumento/câmera
+        label: Tipo de captura (ex: "referencia", "comparacao", "monitoramento")
+        
+    Returns:
+        str: Caminho relativo salvo ou None se falhar
+    """
+    try:
+        # Cria pasta específica da câmera
+        cam_dir = IMAGES_DIR / camera_code
+        cam_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sanitiza nome
+        safe_name = (camera_name or f"Camera_{camera_code}")
+        safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in safe_name)
+        safe_name = safe_name.strip().replace(" ", "_")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_name}_{camera_code}_{label}_{timestamp}.jpg"
+
+        filepath = cam_dir / filename
+
+        # Salva como JPEG
+        cv2.imwrite(str(filepath), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                    [cv2.IMWRITE_JPEG_QUALITY, 92])
+
+        logger.info(f"📸 Snapshot salvo: {filepath}")
+        return str(filepath.relative_to(IMAGES_DIR.parent.parent))  # relativo à raiz do projeto
+    except Exception as e:
+        logger.warning(f"Erro ao salvar snapshot: {e}")
         return None
 
 
@@ -117,8 +353,8 @@ async def monitor_live(
         try:
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(capture_frame, stream_url, 5.0)
-                frame = future.result(timeout=6)
+                future = pool.submit(capture_frame, stream_url, 15.0)
+                frame = future.result(timeout=20)
         except Exception:
             frame = None
         
@@ -134,6 +370,7 @@ async def monitor_live(
                 "total_objects": result.get("yolo_detection", {}).get("total_objects", 0),
             }
             response["hf_prediction"] = result.get("hf_prediction")
+            response["snapshot_path"] = save_camera_snapshot(frame, camera_code, camera_name, "monitoramento")
             
             # Imagem anotada
             if include_image:
@@ -190,13 +427,17 @@ async def monitor_multi(
                 try:
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as pool:
-                        future = pool.submit(capture_frame, stream_url, 5.0)
-                        frame = future.result(timeout=6)
+                        future = pool.submit(capture_frame, stream_url, 15.0)
+                        frame = future.result(timeout=20)
                 except Exception:
                     frame = None
                 
                 if frame is not None:
                     cam_result["frame_captured"] = True
+                    # 📸 Salva snapshot do frame em assets/images/
+                    cam_name = cam_result.get("camera_name", f"Câmera {code}")
+                    cam_result["snapshot_path"] = save_camera_snapshot(frame, code, cam_name, "monitoramento")
+                    
                     result = detection_service.detect_full(frame, camera_id=code, confidence=confidence)
                     cam_result["yolo_detection"] = {
                         "objects": result.get("yolo_detection", {}).get("objects", []),
@@ -299,6 +540,62 @@ async def get_streams(
     return {"success": True, "cameras": result}
 
 
+# ─── Snapshot Manual ────────────────────────────────────────────
+
+@router.post("/snapshot/{camera_code}")
+async def capture_snapshot(
+    camera_code: str,
+):
+    """
+    CAPTURA um print do que a câmera está mostrando AGORA
+    e salva em assets/images/ com o nome do monumento.
+    
+    Retorna o caminho do arquivo salvo para visualização.
+    """
+    if not camera_service:
+        raise HTTPException(status_code=500, detail="Serviço não inicializado")
+    
+    camera = camera_service.get_camera_by_code(camera_code)
+    if not camera:
+        raise HTTPException(status_code=404, detail=f"Câmera {camera_code} não encontrada")
+    
+    camera_name = camera.get("name", f"Câmera {camera_code}")
+    stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
+    
+    if not stream_url:
+        raise HTTPException(status_code=400, detail="Câmera não possui stream URL")
+    
+    # Captura frame real (sem fallback sintético)
+    frame = capture_frame(stream_url, timeout_sec=20.0)
+    
+    if frame is None:
+        return {
+            "success": False,
+            "error": "Não foi possível capturar frame da câmera. "
+                     "Verifique se o stream está acessível.",
+            "camera_code": camera_code,
+            "camera_name": camera_name,
+        }
+    
+    # Salva snapshot
+    snapshot_path = save_camera_snapshot(frame, camera_code, camera_name, "print")
+    
+    # Codifica como base64 pra exibição imediata
+    _, buffer = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                             [cv2.IMWRITE_JPEG_QUALITY, 92])
+    image_base64 = base64.b64encode(buffer).decode("utf-8")
+    
+    return {
+        "success": True,
+        "camera_code": camera_code,
+        "camera_name": camera_name,
+        "snapshot_path": snapshot_path,
+        "image_base64": image_base64,
+        "timestamp": time.time(),
+        "message": f"📸 Print salvo: {snapshot_path}",
+    }
+
+
 # ─── Detecção de Mudanças no Monumento (SSIM + HF) ─────────────
 
 @router.post("/change/{camera_code}/reference")
@@ -332,15 +629,21 @@ async def set_reference(
             try:
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 5.0)
-                    frame = future.result(timeout=6)
+                    future = pool.submit(capture_frame, stream_url, 15.0)
+                    frame = future.result(timeout=20)
             except Exception:
                 pass
 
+    frame_real = frame is not None  # guarda se é frame real antes do fallback
     if frame is None:
         # Fallback: gera frame com desenho do monumento pra demo
         logger.warning(f"Não foi possível capturar frame da câmera {camera_code}, usando demo")
         frame = _create_monument_frame()
+
+    # 📸 Salva snapshot da referência em assets/images/ (só se for frame real)
+    if frame_real:
+        camera_name_clean = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
+        save_camera_snapshot(frame, camera_code, camera_name_clean, "referencia")
 
     result = change_detector.set_reference(camera_code, frame, detection_service)
 
@@ -386,8 +689,8 @@ async def detect_changes(
                 try:
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as pool:
-                        future = pool.submit(capture_frame, stream_url, 5.0)
-                        ref_frame = future.result(timeout=6)
+                        future = pool.submit(capture_frame, stream_url, 15.0)
+                        ref_frame = future.result(timeout=20)
                 except Exception:
                     pass
         if ref_frame is None:
@@ -403,13 +706,19 @@ async def detect_changes(
             try:
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 5.0)
-                    current_frame = future.result(timeout=6)
+                    future = pool.submit(capture_frame, stream_url, 15.0)
+                    current_frame = future.result(timeout=20)
             except Exception:
                 pass
 
+    frame_real = current_frame is not None  # guarda se é frame real antes do fallback
     if current_frame is None:
         current_frame = _create_monument_frame()
+
+    # 📸 Salva snapshot da comparação em assets/images/ (só se for frame real)
+    if frame_real:
+        camera_name_comp = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
+        save_camera_snapshot(current_frame, camera_code, camera_name_comp, "comparacao")
 
     result = change_detector.check(camera_code, current_frame, detection_service)
     if not result.get("success"):
