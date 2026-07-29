@@ -117,6 +117,30 @@ class ApiClient {
     return data
   }
 
+  // ─── Zona/Quadrante calibrável por câmera ─────────────────────
+
+  async getZone(cameraCode: string) {
+    const { data } = await this.http.get(`/api/monitor/zone/${cameraCode}`)
+    return data
+  }
+
+  async setZone(cameraCode: string, zone: { x_start: number; x_end: number; y_start: number; y_end: number }) {
+    const { data } = await this.http.put(`/api/monitor/zone/${cameraCode}`, zone)
+    return data
+  }
+
+  async resetZone(cameraCode: string) {
+    const { data } = await this.http.delete(`/api/monitor/zone/${cameraCode}`)
+    return data
+  }
+
+  async getZoneFrame(cameraCode: string) {
+    const { data } = await this.http.get(`/api/monitor/zone/${cameraCode}/frame`, {
+      timeout: 20000,
+    })
+    return data
+  }
+
   async getModelsStatus() {
     const { data } = await this.http.get('/api/detect/models')
     return data.models

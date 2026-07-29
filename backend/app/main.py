@@ -17,6 +17,7 @@ _backend_root = str(Path(__file__).resolve().parent.parent)
 if _backend_root not in sys.path:
     sys.path.insert(0, _backend_root)
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -64,9 +65,21 @@ async def lifespan(app: FastAPI):
             status = "✅" if loaded else "❌"
             logger.info(f"{status} Modelo {name}: {'carregado' if loaded else 'não carregado'}")
 
+    # Sobe o loop de monitoramento contínuo (varre todas as câmeras dos
+    # patrimônios em background, mesmo sem ninguém olhando o frontend)
+    from app.services import background_monitor
+    monitor_task = background_monitor.start()
+
     logger.info("✅ API pronta para receber requisições")
     yield
     logger.info("🛑 API encerrando...")
+
+    if monitor_task:
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 # ─── Criação da Aplicação ───────────────────────────────────────
@@ -115,7 +128,7 @@ if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 # ─── Injeção de Dependências nas Rotas ──────────────────────────
-from app.api import auth, cameras, vandalism, dashboard, monitor
+from app.api import auth, cameras, vandalism, dashboard, monitor, alerts
 
 auth.init_routes(camera_service)
 cameras.init_routes(camera_service)
@@ -128,6 +141,7 @@ app.include_router(cameras.router)
 app.include_router(vandalism.router)
 app.include_router(dashboard.router)
 app.include_router(monitor.router)
+app.include_router(alerts.router)
 
 
 # ─── Health Check ───────────────────────────────────────────────

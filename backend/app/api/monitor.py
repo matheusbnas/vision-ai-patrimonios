@@ -18,8 +18,10 @@ from fastapi.responses import JSONResponse
 
 from app.services.camera_service import CameraService
 from app.services.detection_service import DetectionService
+from app.services import zone_service, alert_service
 from app.models.change_detector import ChangeDetector
 from app.config import IMAGES_DIR
+from app.schemas.schemas import ZoneInput
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitor", tags=["Monitoramento ao Vivo"])
@@ -261,19 +263,32 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.nda
     return None
 
 
+# Labels de captura automática/repetitiva — sobrescrevem sempre o mesmo
+# arquivo (1 por câmera+label) em vez de acumular um arquivo novo a cada
+# captura. "print" (snapshot manual, botão explícito) fica de fora e
+# continua gerando um arquivo por captura, já que é uma ação deliberada
+# do usuário e não um loop automático.
+_OVERWRITE_LABELS = {"monitoramento", "comparacao", "referencia"}
+
+
 def save_camera_snapshot(frame: np.ndarray, camera_code: str,
                           camera_name: str = "",
                           label: str = "captura") -> Optional[str]:
     """
-    Salva o frame capturado da câmera em assets/images/{camera_code}/
-    com nome padronizado: {camera_name}_{camera_code}_{label}_{timestamp}.jpg
-    
+    Salva o frame capturado da câmera em assets/images/{camera_code}/.
+
+    Para labels em _OVERWRITE_LABELS (monitoramento/comparacao/referencia),
+    usa nome fixo: {camera_name}_{camera_code}_{label}.jpg — cada nova
+    captura sobrescreve a anterior, evitando acumular imagens durante o
+    monitoramento automático (que roda a cada poucos segundos).
+    Para os demais labels (ex.: "print"), mantém o timestamp no nome.
+
     Args:
         frame: Imagem numpy (RGB)
         camera_code: Código da câmera
         camera_name: Nome do monumento/câmera
         label: Tipo de captura (ex: "referencia", "comparacao", "monitoramento")
-        
+
     Returns:
         str: Caminho relativo salvo ou None se falhar
     """
@@ -287,8 +302,11 @@ def save_camera_snapshot(frame: np.ndarray, camera_code: str,
         safe_name = "".join(c if c.isalnum() or c in " _-" else "_" for c in safe_name)
         safe_name = safe_name.strip().replace(" ", "_")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{safe_name}_{camera_code}_{label}_{timestamp}.jpg"
+        if label in _OVERWRITE_LABELS:
+            filename = f"{safe_name}_{camera_code}_{label}.jpg"
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{safe_name}_{camera_code}_{label}_{timestamp}.jpg"
 
         filepath = cam_dir / filename
 
@@ -301,6 +319,31 @@ def save_camera_snapshot(frame: np.ndarray, camera_code: str,
     except Exception as e:
         logger.warning(f"Erro ao salvar snapshot: {e}")
         return None
+
+
+def record_risk_alert(camera_code: str, camera_name: str, risk_alert: Optional[dict]) -> None:
+    """Registra no alert_service um risk_alert (YOLO/preditivo), se houver."""
+    if risk_alert:
+        alert_service.add_alert(
+            camera_code=camera_code,
+            camera_name=camera_name,
+            level=risk_alert["level"],
+            message=risk_alert["message"],
+            source="risk",
+            objects=risk_alert.get("objects"),
+        )
+
+
+def record_ssim_alert(camera_code: str, camera_name: str, alert: Optional[dict]) -> None:
+    """Registra no alert_service um alert de mudança física (SSIM), se houver."""
+    if alert:
+        alert_service.add_alert(
+            camera_code=camera_code,
+            camera_name=camera_name,
+            level=alert["level"],
+            message=alert["message"],
+            source="ssim",
+        )
 
 
 @router.get("/live/{camera_code}")
@@ -343,6 +386,7 @@ async def monitor_live(
         "stream_url": stream_url or "",
         "timestamp": time.time(),
         "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
+        "risk_alert": None,
         "hf_prediction": None,
         "image_base64": None,
         "frame_captured": False,
@@ -369,7 +413,9 @@ async def monitor_live(
                 "counts": result.get("yolo_detection", {}).get("counts", {}),
                 "total_objects": result.get("yolo_detection", {}).get("total_objects", 0),
             }
+            response["risk_alert"] = result.get("risk_alert")
             response["hf_prediction"] = result.get("hf_prediction")
+            record_risk_alert(camera_code, camera_name, response["risk_alert"])
             response["snapshot_path"] = save_camera_snapshot(frame, camera_code, camera_name, "monitoramento")
             
             # Imagem anotada
@@ -410,6 +456,7 @@ async def monitor_multi(
             "camera_code": code,
             "success": False,
             "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
+            "risk_alert": None,
             "hf_prediction": None,
             "frame_captured": False,
         }
@@ -444,7 +491,9 @@ async def monitor_multi(
                         "counts": result.get("yolo_detection", {}).get("counts", {}),
                         "total_objects": result.get("yolo_detection", {}).get("total_objects", 0),
                     }
+                    cam_result["risk_alert"] = result.get("risk_alert")
                     cam_result["hf_prediction"] = result.get("hf_prediction")
+                    record_risk_alert(code, cam_name, cam_result["risk_alert"])
             
             cam_result["success"] = True
             
@@ -505,6 +554,7 @@ async def monitor_demo(
             "counts": result.get("yolo_detection", {}).get("counts", {}),
             "total_objects": result.get("yolo_detection", {}).get("total_objects", 0),
         },
+        "risk_alert": result.get("risk_alert"),
         "hf_prediction": result.get("hf_prediction"),
         "processing_time_ms": result.get("processing_time_ms", 0),
     }
@@ -724,6 +774,9 @@ async def detect_changes(
     if not result.get("success"):
         return result
 
+    camera_name_alert = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
+    record_ssim_alert(camera_code, camera_name_alert, result["alert"])
+
     return {
         "success": True,
         "camera_code": camera_code,
@@ -737,6 +790,73 @@ async def detect_changes(
         "alert": result["alert"],
         "alert_level": result["alert_level"],
         "highlight_image_base64": result["highlight_image_base64"],
+    }
+
+
+# ─── Calibração de Zona (quadrante por câmera) ─────────────────
+
+@router.get("/zone/{camera_code}")
+async def get_zone(camera_code: str):
+    """Retorna a zona (quadrante) calibrada da câmera, ou o padrão."""
+    return {
+        "success": True,
+        "camera_code": camera_code,
+        "zone": zone_service.get_zone(camera_code),
+        "is_custom": zone_service.is_custom(camera_code),
+    }
+
+
+@router.put("/zone/{camera_code}")
+async def put_zone(camera_code: str, zone: ZoneInput):
+    """Salva a zona (quadrante) calibrada da câmera."""
+    try:
+        saved = zone_service.set_zone(camera_code, zone.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "camera_code": camera_code, "zone": saved}
+
+
+@router.delete("/zone/{camera_code}")
+async def delete_zone(camera_code: str):
+    """Remove a calibração custom da câmera, voltando ao quadrante padrão."""
+    default = zone_service.reset_zone(camera_code)
+    return {"success": True, "camera_code": camera_code, "zone": default}
+
+
+@router.get("/zone/{camera_code}/frame")
+async def get_zone_frame(camera_code: str):
+    """
+    Captura um frame real da câmera (sem anotação) para servir de base
+    ao desenho do quadrante na ferramenta de calibração do frontend.
+    """
+    if not camera_service:
+        raise HTTPException(status_code=500, detail="Serviço não inicializado")
+
+    frame = None
+    camera = camera_service.get_camera_by_code(camera_code)
+    if camera:
+        stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
+        if stream_url:
+            try:
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(capture_frame, stream_url, 15.0)
+                    frame = future.result(timeout=20)
+            except Exception:
+                pass
+
+    frame_real = frame is not None
+    if frame is None:
+        logger.warning(f"Não foi possível capturar frame da câmera {camera_code} para calibração, usando demo")
+        frame = _create_monument_frame()
+
+    _, buffer = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                             [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return {
+        "success": True,
+        "camera_code": camera_code,
+        "frame_captured": frame_real,
+        "image_base64": base64.b64encode(buffer).decode("utf-8"),
     }
 
 

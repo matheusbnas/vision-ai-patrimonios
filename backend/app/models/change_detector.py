@@ -18,22 +18,23 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 
+from app.services import zone_service
+
 logger = logging.getLogger(__name__)
 
-# Proporção do ROI no frame (centro) — focado no monumento
-ROI_X_START = 0.20   # 20% da largura
-ROI_X_END = 0.80     # 80% da largura
-ROI_Y_START = 0.15   # 15% da altura
-ROI_Y_END = 0.75     # 75% da altura
 
+def extrair_roi(frame: np.ndarray, camera_code: Optional[str] = None) -> np.ndarray:
+    """Extrai a região de interesse (onde está o monumento) do frame.
 
-def extrair_roi(frame: np.ndarray) -> np.ndarray:
-    """Extrai a região de interesse (onde está o monumento) do frame"""
+    Usa a zona calibrada da câmera (zone_service), se houver;
+    senão cai no quadrante padrão.
+    """
+    zone = zone_service.get_zone(camera_code)
     h, w = frame.shape[:2]
-    x1 = int(w * ROI_X_START)
-    x2 = int(w * ROI_X_END)
-    y1 = int(h * ROI_Y_START)
-    y2 = int(h * ROI_Y_END)
+    x1 = int(w * zone["x_start"])
+    x2 = int(w * zone["x_end"])
+    y1 = int(h * zone["y_start"])
+    y2 = int(h * zone["y_end"])
     return frame[y1:y2, x1:x2]
 
 
@@ -66,7 +67,7 @@ class ChangeDetector:
         Extrai o ROI (região da estátua) e armazena.
         Se det_service for fornecido, também executa HF model.
         """
-        roi = extrair_roi(frame)
+        roi = extrair_roi(frame, camera_code)
         hf_result = None
         if det_service and det_service.hf_vandalism.model_loaded:
             try:
@@ -108,7 +109,7 @@ class ChangeDetector:
         ref_img = ref_data["reference_image"]
 
         # Extrai ROI do frame atual e redimensiona para match
-        current_roi = extrair_roi(current_frame)
+        current_roi = extrair_roi(current_frame, camera_code)
         current_roi = cv2.resize(current_roi, (ref_img.shape[1], ref_img.shape[0]))
 
         # ─── 1. SSIM entre ROI de referência e ROI atual ───────────

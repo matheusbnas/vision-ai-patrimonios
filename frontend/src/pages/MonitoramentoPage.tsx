@@ -7,9 +7,11 @@ import {
   AlertTriangle,
   RefreshCw,
   WifiOff,
+  Target,
 } from 'lucide-react'
 import { api } from '../api/client'
 import type { Patrimonio } from '../types'
+import ZoneCalibrator from '../components/ZoneCalibrator'
 
 interface DetectionFrame {
   camera_code: string
@@ -39,6 +41,12 @@ interface DetectionFrame {
   }
   alert_level?: string
   ssim_alert_level?: string
+  // Alerta preditivo do YOLO (objeto de risco dentro do quadrante do monumento)
+  risk_alert?: {
+    level: string
+    message: string
+    objects?: string[]
+  }
 }
 
 function CameraQuadrant({
@@ -86,6 +94,7 @@ export default function MonitoramentoPage() {
   const [running, setRunning] = useState(false)
   const [loading, setLoading] = useState(false)
   const [streamErrors, setStreamErrors] = useState<Record<string, boolean>>({})
+  const [calibratingCode, setCalibratingCode] = useState<string | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -331,6 +340,14 @@ export default function MonitoramentoPage() {
               <RefreshCw size={12} />
               🔍 Comparar com Referência
             </button>
+            <button
+              onClick={() => setCalibratingCode(selectedCodes[0])}
+              disabled={selectedCodes.length === 0}
+              className="w-full py-1.5 px-3 rounded-lg text-xs font-medium bg-yellow-50 text-yellow-800 hover:bg-yellow-100 border border-yellow-200 flex items-center gap-2 disabled:opacity-50"
+            >
+              <Target size={12} />
+              🎯 Calibrar Zona
+            </button>
           </div>
         </div>
 
@@ -345,7 +362,7 @@ export default function MonitoramentoPage() {
                  style={{ gridTemplateRows: '1fr' }}>
               {selectedCodes.map((code) => {
                 const frame = frames[code]
-                const hasAlert = frame?.alert != null
+                const hasAlert = frame?.alert != null || frame?.risk_alert != null
 
                 return (
                   <div key={code} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col">
@@ -398,15 +415,21 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
-                      {/* Badge de alerta */}
-                      {frame?.alert && (
+                      {/* Badge de alerta preditivo (YOLO — objeto de risco no quadrante) */}
+                      {frame?.risk_alert ? (
+                        <div className="absolute top-2 left-2 z-10">
+                          <span className="text-[10px] px-2 py-0.5 rounded font-bold shadow-lg bg-red-600 text-white animate-pulse">
+                            🔪 PREDITIVO: {frame.risk_alert.objects?.join('/').toUpperCase()}
+                          </span>
+                        </div>
+                      ) : frame?.alert && (
                         <div className="absolute top-2 left-2 z-10">
                           <span className={`text-[10px] px-2 py-0.5 rounded font-bold shadow-lg ${
                             frame.alert.level === 'CRÍTICO' || frame.alert.level === 'ALTO'
                               ? 'bg-red-600 text-white animate-pulse'
                               : 'bg-yellow-500 text-black'
                           }`}>
-                            🚨 {frame.alert.level}: {frame.alert.types?.join('/').toUpperCase()}
+                            🚨 {frame.alert.level}
                           </span>
                         </div>
                       )}
@@ -421,6 +444,16 @@ export default function MonitoramentoPage() {
 
                     {/* Painel de análise - SSIM + HF */}
                     <div className="p-3 space-y-2 text-xs">
+                      {/* Alerta preditivo (YOLO — objeto de risco no quadrante) */}
+                      {frame?.risk_alert && (
+                        <div className="rounded-lg p-2 flex items-center gap-2 bg-red-100 text-red-800 animate-pulse">
+                          <AlertTriangle size={16} className="shrink-0" />
+                          <div>
+                            <p className="font-bold text-[10px]">{frame.risk_alert.message}</p>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Alerta (se houver) */}
                       {frame?.alert && (
                         <div className={`rounded-lg p-2 flex items-center gap-2 ${
@@ -494,14 +527,14 @@ export default function MonitoramentoPage() {
 
 
                       {/* Objetos detectados pelo YOLO */}
-                      {frame?.yolo_detection?.total_objects > 0 && (
+                      {(frame?.yolo_detection?.total_objects ?? 0) > 0 && (
                         <div>
                           <p className="text-[9px] font-semibold text-gray-500 uppercase mb-1">
                             <ShieldAlert size={10} className="inline mr-0.5" />
                             Objetos detectados
                           </p>
                           <div className="flex flex-wrap gap-1">
-                            {Object.entries(frame.yolo_detection.counts).map(([name, count]) => (
+                            {Object.entries(frame.yolo_detection?.counts ?? {}).map(([name, count]) => (
                               <span key={name} className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-[9px]">
                                 {name.replace(/_/g, ' ')}: {count}
                               </span>
@@ -511,7 +544,7 @@ export default function MonitoramentoPage() {
                       )}
 
                       {/* Mensagem vazia */}
-                      {!frame?.alert && frame?.similarity_score == null && (
+                      {!frame?.alert && !frame?.risk_alert && frame?.similarity_score == null && (
                         <div className="text-center text-gray-400 text-[10px] py-1">
                           {frame ? 'Aguardando verificação...' : 'Aguardando primeiro scan...'}
                         </div>
@@ -523,14 +556,14 @@ export default function MonitoramentoPage() {
             </div>
 
             {/* Alerta geral */}
-            {Object.values(frames).some((f) => f.alert != null) && (
+            {Object.values(frames).some((f) => f.alert != null || f.risk_alert != null) && (
               <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex items-center gap-3">
                 <AlertTriangle size={20} className="text-red-500 shrink-0" />
                 <div>
                   <p className="text-sm font-bold text-red-700">🚨 ALERTA DE VANDALISMO DETECTADO</p>
                   <p className="text-xs text-red-600">
                     {Object.values(frames)
-                      .filter((f) => f.alert != null)
+                      .filter((f) => f.alert != null || f.risk_alert != null)
                       .map((f) => `${f.camera_name} (cód. ${f.camera_code})`)
                       .join(', ')}
                   </p>
@@ -548,6 +581,10 @@ export default function MonitoramentoPage() {
           </div>
         )}
       </div>
+
+      {calibratingCode && (
+        <ZoneCalibrator cameraCode={calibratingCode} onClose={() => setCalibratingCode(null)} />
+      )}
     </div>
   )
 }

@@ -23,6 +23,7 @@ backend/models_cache/
 # ─── Cache (JWT tokens, camera data) ───────────────────────────
 cache/
 backend/cache/
+backend/_stream_url.txt
 !.gitkeep
 
 # ─── Streamlit (removido) ──────────────────────────────────────

@@ -110,3 +110,12 @@ class UploadResponse(BaseModel):
     path: str
     size_bytes: int
     content_type: str
+
+
+# ─── Zona/Quadrante de Monitoramento ──────────────────────────────
+
+class ZoneInput(BaseModel):
+    x_start: float
+    x_end: float
+    y_start: float
+    y_end: float
