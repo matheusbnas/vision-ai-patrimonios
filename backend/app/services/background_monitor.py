@@ -55,8 +55,12 @@ def _process_camera(code: str) -> None:
     risk_alert = result.get("risk_alert")
     monitor_api.record_risk_alert(code, camera_name, risk_alert)
 
-    # Só compara por SSIM se já existe referência definida pra essa câmera
-    if code in change_detector.monitored:
+    # Garante que toda câmera tenha uma referência SSIM — sem isso, mudança
+    # física (pichação, dano, peça removida) nunca gera alerta pra essa câmera.
+    if code not in change_detector.monitored:
+        change_detector.set_reference(code, frame, detection_service)
+        logger.info(f"[background_monitor] Referência SSIM criada automaticamente para câmera {code}")
+    else:
         change_result = change_detector.check(code, frame, detection_service)
         if change_result.get("success"):
             monitor_api.record_ssim_alert(code, camera_name, change_result.get("alert"))

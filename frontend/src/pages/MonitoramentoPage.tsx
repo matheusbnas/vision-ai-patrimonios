@@ -95,7 +95,8 @@ export default function MonitoramentoPage() {
   const [loading, setLoading] = useState(false)
   const [streamErrors, setStreamErrors] = useState<Record<string, boolean>>({})
   const [calibratingCode, setCalibratingCode] = useState<string | null>(null)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const runningRef = useRef(false)
 
   useEffect(() => {
     api.getPatrimonios().then(setPatrimonios).catch(() => {})
@@ -132,8 +133,19 @@ export default function MonitoramentoPage() {
       codes.forEach((c) => {
         if (!newSelected.includes(c)) newSelected.push(c)
       })
-      setSelectedCodes(newSelected.slice(0, 4))
+      setSelectedCodes(newSelected)
     }
+    setStreamErrors({})
+  }
+
+  const selectAllCameras = () => {
+    const allCodes = patrimonios.flatMap((p) => p.camera_codes)
+    setSelectedCodes(allCodes)
+    setStreamErrors({})
+  }
+
+  const clearSelection = () => {
+    setSelectedCodes([])
     setStreamErrors({})
   }
 
@@ -199,20 +211,34 @@ export default function MonitoramentoPage() {
     }
   }, [scan, selectedCodes])
 
+  // Loop que se reagenda sozinho (em vez de setInterval fixo) — com muitas
+  // câmeras selecionadas, um ciclo (scan + comparação) pode levar bem mais
+  // que 10s (Playwright captura uma câmera de cada vez). Reagendar só depois
+  // que o ciclo anterior terminar evita empilhar requisições simultâneas.
+  const runAutoScanLoop = useCallback(async () => {
+    if (!runningRef.current) return
+    await scanAndCompare()
+    if (runningRef.current) {
+      intervalRef.current = setTimeout(runAutoScanLoop, 10000)
+    }
+  }, [scanAndCompare])
+
   const toggleAutoScan = () => {
     if (running) {
-      if (intervalRef.current) clearInterval(intervalRef.current)
+      runningRef.current = false
+      if (intervalRef.current) clearTimeout(intervalRef.current)
       setRunning(false)
     } else {
-      scanAndCompare()
-      intervalRef.current = setInterval(scanAndCompare, 10000)
+      runningRef.current = true
       setRunning(true)
+      runAutoScanLoop()
     }
   }
 
   useEffect(() => {
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
+      runningRef.current = false
+      if (intervalRef.current) clearTimeout(intervalRef.current)
     }
   }, [])
 
@@ -229,9 +255,25 @@ export default function MonitoramentoPage() {
     <div className="flex gap-4 h-full">
       {/* Sidebar - Lista de patrimônios */}
       <div className="w-56 flex-shrink-0 space-y-2 overflow-y-auto">
-        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide px-1">
-          Câmeras disponíveis
-        </h3>
+        <div className="flex items-center justify-between px-1">
+          <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Câmeras disponíveis
+          </h3>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={selectAllCameras}
+              className="text-[10px] text-cor-blue hover:underline"
+            >
+              Todas
+            </button>
+            <button
+              onClick={clearSelection}
+              className="text-[10px] text-gray-400 hover:underline"
+            >
+              Limpar
+            </button>
+          </div>
+        </div>
         <div className="space-y-1.5">
           {patrimonios
             .filter((p) => p.camera_codes.length > 0)
@@ -354,12 +396,15 @@ export default function MonitoramentoPage() {
       </div>
 
       {/* Grid de câmeras */}
-      <div className="flex-1 flex flex-col space-y-3">
+      <div className="flex-1 flex flex-col space-y-3 overflow-y-auto">
         {selectedCodes.length > 0 ? (
           <>
-            {/* Grid de quadrantes — ocupa toda a altura disponível */}
-            <div className={`grid gap-3 flex-1 ${selectedCodes.length <= 1 ? 'grid-cols-1' : selectedCodes.length === 2 ? 'grid-cols-2' : 'grid-cols-2'}`}
-                 style={{ gridTemplateRows: '1fr' }}>
+            {/* Grid de quadrantes — rola verticalmente quando muitas câmeras estão ativas */}
+            <div className={`grid gap-3 ${
+              selectedCodes.length <= 1 ? 'grid-cols-1' :
+              selectedCodes.length <= 4 ? 'grid-cols-2' :
+              'grid-cols-2 xl:grid-cols-4'
+            }`}>
               {selectedCodes.map((code) => {
                 const frame = frames[code]
                 const hasAlert = frame?.alert != null || frame?.risk_alert != null
@@ -386,7 +431,7 @@ export default function MonitoramentoPage() {
                     </div>
 
                     {/* Stream ao vivo + overlay — ocupa a maior parte da tela */}
-                    <div className="relative bg-black flex-1" style={{ minHeight: '420px' }}>
+                    <div className="relative bg-black flex-1" style={{ minHeight: selectedCodes.length > 4 ? '240px' : '420px' }}>
                       {/* Iframe do stream Tixxi com JWT real vindo da API */}
                       <iframe
                         key={code}

@@ -26,6 +26,10 @@ from app.schemas.schemas import ZoneInput
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitor", tags=["Monitoramento ao Vivo"])
 
+# Teto de segurança pra requisições em lote (/multi, /streams) — não é mais
+# 4, já que o pedido é acompanhar todas as câmeras dos patrimônios ao vivo.
+MAX_BATCH_CAMERAS = 16
+
 camera_service: CameraService = None
 detection_service: DetectionService = None
 change_detector = ChangeDetector()
@@ -117,6 +121,19 @@ def _parse_mjpeg_frame(stream_url: str, timeout_sec: float = 5.0) -> Optional[np
         logger.warning(f"MJPEG parser error: {e}")
     
     return None
+
+
+# Cor de fundo (BGR) da tela de "Reconectando..." exibida pelo player
+# quando o stream cai — se a maior parte do frame capturado for essa cor,
+# não é vídeo real, é a UI de erro do player renderizada pelo Playwright.
+_STREAM_ERROR_BG_BGR = np.array([26, 20, 14])
+
+
+def _is_stream_error_frame(frame_rgb: np.ndarray) -> bool:
+    """Detecta se o frame capturado é a tela de erro/reconectando do player, não vídeo real."""
+    bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    dist = np.linalg.norm(bgr.astype(int) - _STREAM_ERROR_BG_BGR, axis=2)
+    return (dist < 15).mean() > 0.5
 
 
 def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.ndarray]:
@@ -219,9 +236,15 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.nda
             
             img = Image.open(io.BytesIO(screenshot))
             frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            if _is_stream_error_frame(frame_rgb):
+                logger.warning(f"Playwright: capturou tela de 'Reconectando' (tentativa {tentativa+1}), não é vídeo real")
+                continue  # tenta de novo (nova sessão) antes de cair pros outros métodos
+
             logger.info("✅ Playwright: frame capturado com sucesso!")
-            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    
+            return frame_rgb
+
     except Exception as e:
         logger.warning(f"Playwright falhou: {e}")
     
@@ -451,7 +474,7 @@ async def monitor_multi(
         raise HTTPException(status_code=400, detail="Nenhum código de câmera informado")
     
     results = []
-    for code in camera_codes[:4]:  # Máximo 4 câmeras por vez
+    for code in camera_codes[:MAX_BATCH_CAMERAS]:
         cam_result = {
             "camera_code": code,
             "success": False,
@@ -574,7 +597,7 @@ async def get_streams(
     camera_codes = [c.strip() for c in codes.split(",") if c.strip()]
     result = []
 
-    for code in camera_codes[:4]:
+    for code in camera_codes[:MAX_BATCH_CAMERAS]:
         camera = camera_service.get_camera_by_code(code)
         name = camera.get("name", f"Câmera {code}") if camera else f"Câmera {code}"
         stream_url = camera.get("stream_url") if camera else None

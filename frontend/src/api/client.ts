@@ -77,7 +77,9 @@ class ApiClient {
     if (confidence) params.confidence = confidence
     const { data } = await this.http.get('/api/monitor/multi', {
       params,
-      timeout: 45000,  // 45s máx para processar todas as câmeras
+      // Captura é sequencial por câmera (Playwright) — com todas as ~8
+      // câmeras dos patrimônios selecionadas, o ciclo pode levar minutos.
+      timeout: 180000,
     })
     return data
   }
@@ -85,7 +87,7 @@ class ApiClient {
   async getStreams(codes: string[]) {
     const { data } = await this.http.get('/api/monitor/streams', {
       params: { codes: codes.join(',') },
-      timeout: 15000,
+      timeout: 30000,
     })
     return data
   }
