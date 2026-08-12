@@ -85,11 +85,59 @@ function CameraQuadrant({
   )
 }
 
+// Patrimônio com mais de uma câmera — mostra cada uma separada, pra dar pra
+// escolher qual(is) ver ao vivo em vez de ligar todas juntas de uma vez.
+function CameraCodeGroup({
+  patrimony,
+  codeNames,
+  selectedCodes,
+  onToggleCode,
+}: {
+  patrimony: Patrimonio
+  codeNames: Record<string, string>
+  selectedCodes: string[]
+  onToggleCode: (code: string) => void
+}) {
+  return (
+    <div className="p-2 rounded-lg border border-gray-200 bg-white space-y-1.5">
+      <div className="flex items-center gap-2">
+        <span className="text-lg">{patrimony.emoji}</span>
+        <p className="text-xs font-medium text-gray-800 truncate flex-1">{patrimony.nome}</p>
+      </div>
+      <div className="pl-1 space-y-1">
+        {patrimony.camera_codes.map((code) => {
+          const isSelected = selectedCodes.includes(code)
+          return (
+            <button
+              key={code}
+              onClick={() => onToggleCode(code)}
+              className={`w-full flex items-center gap-2 px-2 py-1 rounded-md text-left transition-all ${
+                isSelected
+                  ? 'border border-red-400 bg-red-50 ring-1 ring-red-300'
+                  : 'border border-gray-100 bg-gray-50 hover:border-gray-300'
+              }`}
+            >
+              <span className={`status-dot shrink-0 ${isSelected ? 'online' : ''}`} />
+              <span className="text-[10px] text-gray-600 truncate flex-1">
+                {codeNames[code] || `Câmera ${code}`}
+              </span>
+              <span className="text-[9px] text-gray-400 shrink-0">{code}</span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export default function MonitoramentoPage() {
   const [patrimonios, setPatrimonios] = useState<Patrimonio[]>([])
   const [selectedCodes, setSelectedCodes] = useState<string[]>([])
   const [streamUrls, setStreamUrls] = useState<Record<string, string>>({})
   const [cameraNames, setCameraNames] = useState<Record<string, string>>({})
+  // Nome de cada câmera individual (independe de seleção) — usado pra rotular
+  // os chips quando um patrimônio tem mais de uma câmera disponível.
+  const [codeNames, setCodeNames] = useState<Record<string, string>>({})
   const [frames, setFrames] = useState<Record<string, DetectionFrame>>({})
   const [running, setRunning] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -99,7 +147,21 @@ export default function MonitoramentoPage() {
   const runningRef = useRef(false)
 
   useEffect(() => {
-    api.getPatrimonios().then(setPatrimonios).catch(() => {})
+    api.getPatrimonios().then((data) => {
+      setPatrimonios(data)
+      const allCodes = Array.from(new Set(data.flatMap((p) => p.camera_codes)))
+      if (allCodes.length > 0) {
+        api.getCamerasByCodes(allCodes)
+          .then((cams) => {
+            const names: Record<string, string> = {}
+            for (const cam of cams) {
+              if (cam.code) names[cam.code] = cam.name || `Câmera ${cam.code}`
+            }
+            setCodeNames(names)
+          })
+          .catch(() => {})
+      }
+    }).catch(() => {})
   }, [])
 
   // Busca URLs reais dos streams (com JWT válido) sempre que selecionar câmeras
@@ -126,7 +188,7 @@ export default function MonitoramentoPage() {
     if (codes.length === 0) return
     const newSelected = [...selectedCodes]
     const alreadySelected = codes.every((c) => selectedCodes.includes(c))
-    
+
     if (alreadySelected) {
       setSelectedCodes(selectedCodes.filter((c) => !codes.includes(c)))
     } else {
@@ -135,6 +197,13 @@ export default function MonitoramentoPage() {
       })
       setSelectedCodes(newSelected)
     }
+    setStreamErrors({})
+  }
+
+  const toggleSingleCode = (code: string) => {
+    setSelectedCodes((prev) =>
+      prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]
+    )
     setStreamErrors({})
   }
 
@@ -278,6 +347,17 @@ export default function MonitoramentoPage() {
           {patrimonios
             .filter((p) => p.camera_codes.length > 0)
             .map((p) => {
+              if (p.camera_codes.length > 1) {
+                return (
+                  <CameraCodeGroup
+                    key={p.id}
+                    patrimony={p}
+                    codeNames={codeNames}
+                    selectedCodes={selectedCodes}
+                    onToggleCode={toggleSingleCode}
+                  />
+                )
+              }
               const anySelected = p.camera_codes.some((c) => selectedCodes.includes(c))
               return (
                 <CameraQuadrant
