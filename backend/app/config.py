@@ -186,22 +186,23 @@ PATRIMONIOS = [
     #            "aponta pro monumento. Candidatas ainda não testadas: 001219, 001220, 001229, 001230, "
     #            "001233, 001234, 006141 (mesmo cruzamento Av. Atlântica x Ponta do Leme).",
     # },
-    {
-        "id": 8,
-        "nome": "Relógio da Glória",
-        "descricao": "Relógio da Glória — monumento histórico de 1905, Rua da Glória, 290",
-        "bairro": "Glória",
-        "endereco": "R. da Glória - Glória, Rio de Janeiro - RJ, 20241-190",
-        "categoria": "Patrimônio Histórico",
-        "emoji": "🕰️",
-        "latitude": -22.920482,
-        "longitude": -43.177031,
-        "camera_codes": ["000315", "005534"],
-        "obs": "Endereço corrigido (12/08) — cadastro antigo tinha bairro/endereço errados (Alto da Boa "
-               "Vista não faz sentido pra esse monumento). Testando 000315 ('R. DA GLÓRIA X R. BENJAMIM "
-               "CONSTANT') e 005534 ('R. DA GLÓRIA, 148'), as câmeras mais próximas do nº 290 onde fica "
-               "o relógio — ainda não confirmadas visualmente.",
-    },
+    # Desativado (12/08) — 000315 e 005534 testadas e removidas, mostram rua/trânsito, sem o relógio no quadro.
+    # {
+    #     "id": 8,
+    #     "nome": "Relógio da Glória",
+    #     "descricao": "Relógio da Glória — monumento histórico de 1905, Rua da Glória, 290",
+    #     "bairro": "Glória",
+    #     "endereco": "R. da Glória - Glória, Rio de Janeiro - RJ, 20241-190",
+    #     "categoria": "Patrimônio Histórico",
+    #     "emoji": "🕰️",
+    #     "latitude": -22.920482,
+    #     "longitude": -43.177031,
+    #     "camera_codes": [],
+    #     "obs": "Endereço corrigido (12/08) — cadastro antigo tinha bairro/endereço errados (Alto da Boa "
+    #            "Vista não faz sentido pra esse monumento). 000315 e 005534 testadas e removidas (rua/ "
+    #            "trânsito, sem o relógio no quadro). Candidatas ainda não testadas: 005531/005532 (R. da "
+    #            "Glória, 58), 005533 (Chafariz da Glória, mesma rua).",
+    # },
     {
         "id": 11,
         "nome": "Carlos Drummond de Andrade",
