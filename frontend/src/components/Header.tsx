@@ -7,6 +7,8 @@ const pageTitles: Record<Page, string> = {
   dashboard: 'Dashboard',
   patrimonios: 'Patrimônios Monitorados',
   mapa: 'Mapa de Câmeras',
+  detector: 'Detector de Objetos',
+  vandalismo: 'Antivandalismo',
   monitoramento: 'Monitoramento ao Vivo',
   analise: 'Análise por Região',
   sobre: 'Sobre o Sistema',
