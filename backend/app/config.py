@@ -93,6 +93,22 @@ RISK_CLASSES = {
 # nível base da classe.
 DWELL_ALERT_SECONDS = 120
 
+# Classes "passageiras" — pessoas e veículos que atravessam a zona do
+# monumento (calçada, rua, rotatória) mas não fazem parte dele. O
+# change_detector usa isso pra excluir essas áreas do cálculo de %
+# alterado: um pedestre, ciclista ou carro passando não pode ser
+# contado como pichação/dano físico no monumento.
+TRANSIENT_CLASSES = {"pessoa", "bicicleta", "carro", "moto", "ônibus", "caminhão"}
+
+# Tempo (segundos) que uma pessoa precisa permanecer continuamente dentro
+# da zona do monumento pra gerar um alerta preventivo de permanência
+# suspeita (risco de furto/vandalismo iminente, antes de qualquer dano
+# acontecer). Mesma aproximação por presença de classe usada em
+# RISK_CLASSES/risk_tracker — o YOLO não reidentifica indivíduos entre
+# frames, então "a mesma pessoa" é aproximada por "sempre há uma pessoa
+# presente na zona, sem sumir entre varreduras".
+PERSON_LOITERING_ALERT_SECONDS = int(os.getenv("PERSON_LOITERING_ALERT_SECONDS", "600"))  # 10 min
+
 # ─── Classes ─────────────────────────────────────────────────────
 # Mapeamento 1:1 com a ordem real das 80 classes COCO usadas pelo YOLO
 # (ver `model.names` do ultralytics) — traduzido para português.

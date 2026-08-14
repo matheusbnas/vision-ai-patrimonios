@@ -8,6 +8,7 @@ import {
   RefreshCw,
   WifiOff,
   Target,
+  Users,
 } from 'lucide-react'
 import { api } from '../api/client'
 import type { Patrimonio } from '../types'
@@ -46,6 +47,19 @@ interface DetectionFrame {
     level: string
     message: string
     objects?: string[]
+  }
+  // Alerta preditivo: pessoa parada perto do monumento por muito tempo (permanência suspeita)
+  loitering_alert?: {
+    level: string
+    message: string
+    dwell_seconds?: number
+  }
+  // Pessoas/veículos detectados (YOLO) dentro da zona — não contam como alteração do monumento
+  ignored_objects_count?: number
+  ignored_objects_alert?: {
+    level: string
+    message: string
+    count?: number
   }
 }
 
@@ -271,6 +285,8 @@ export default function MonitoramentoPage() {
                 ssim_alert_level: data.ssim_alert_level,
                 alert: data.alert || undefined,
                 alert_level: data.alert_level || existing.alert_level || 'NORMAL',
+                ignored_objects_count: data.ignored_objects_count,
+                ignored_objects_alert: data.ignored_objects_alert || undefined,
                 timestamp: Date.now() / 1000,
               }
             }
@@ -449,6 +465,8 @@ export default function MonitoramentoPage() {
                         ssim_alert_level: data.ssim_alert_level,
                         alert: data.alert || undefined,
                         alert_level: data.alert_level || 'NORMAL',
+                        ignored_objects_count: data.ignored_objects_count,
+                        ignored_objects_alert: data.ignored_objects_alert || undefined,
                         timestamp: Date.now() / 1000,
                       } as DetectionFrame
                     }))
@@ -487,7 +505,7 @@ export default function MonitoramentoPage() {
             }`}>
               {selectedCodes.map((code) => {
                 const frame = frames[code]
-                const hasAlert = frame?.alert != null || frame?.risk_alert != null
+                const hasAlert = frame?.alert != null || frame?.risk_alert != null || frame?.loitering_alert != null
 
                 return (
                   <div key={code} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col">
@@ -579,6 +597,16 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
+                      {/* Alerta preditivo (permanência suspeita de pessoa na zona) */}
+                      {frame?.loitering_alert && (
+                        <div className="rounded-lg p-2 flex items-center gap-2 bg-orange-100 text-orange-800 animate-pulse">
+                          <Users size={16} className="shrink-0" />
+                          <div>
+                            <p className="font-bold text-[10px]">{frame.loitering_alert.message}</p>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Alerta (se houver) */}
                       {frame?.alert && (
                         <div className={`rounded-lg p-2 flex items-center gap-2 ${
@@ -593,7 +621,17 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
-                      {/* 📸 Snapshot salvo */} 
+                      {/* Info: pessoas/veículos passageiros ignorados na comparação */}
+                      {frame?.ignored_objects_alert && (
+                        <div className="rounded-lg p-2 flex items-center gap-2 bg-blue-50 text-blue-700">
+                          <Users size={16} className="shrink-0" />
+                          <div>
+                            <p className="font-medium text-[10px]">{frame.ignored_objects_alert.message}</p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 📸 Snapshot salvo */}
                       {frame?.snapshot_path && (
                         <div className="bg-gray-50 rounded-lg p-2 flex items-center gap-2">
                           <Camera size={14} className="text-gray-400 shrink-0" />

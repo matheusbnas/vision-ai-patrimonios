@@ -23,18 +23,24 @@ from app.services import zone_service
 logger = logging.getLogger(__name__)
 
 
-def extrair_roi(frame: np.ndarray, camera_code: Optional[str] = None) -> np.ndarray:
-    """Extrai a região de interesse (onde está o monumento) do frame.
-
-    Usa a zona calibrada da câmera (zone_service), se houver;
-    senão cai no quadrante padrão.
-    """
+def _zone_rect_px(frame: np.ndarray, camera_code: Optional[str] = None) -> tuple:
+    """Calcula o retângulo da zona (em pixels do frame original)."""
     zone = zone_service.get_zone(camera_code)
     h, w = frame.shape[:2]
     x1 = int(w * zone["x_start"])
     x2 = int(w * zone["x_end"])
     y1 = int(h * zone["y_start"])
     y2 = int(h * zone["y_end"])
+    return x1, y1, x2, y2
+
+
+def extrair_roi(frame: np.ndarray, camera_code: Optional[str] = None) -> np.ndarray:
+    """Extrai a região de interesse (onde está o monumento) do frame.
+
+    Usa a zona calibrada da câmera (zone_service), se houver;
+    senão cai no quadrante padrão.
+    """
+    x1, y1, x2, y2 = _zone_rect_px(frame, camera_code)
     return frame[y1:y2, x1:x2]
 
 
@@ -90,15 +96,21 @@ class ChangeDetector:
         }
 
     def check(self, camera_code: str, current_frame: np.ndarray,
-              det_service=None) -> dict:
+              det_service=None, ignore_boxes: Optional[list] = None) -> dict:
         """
         Compara o frame atual com a referência.
-        
+
         Args:
             camera_code: Código da câmera
             current_frame: Frame atual (numpy RGB)
             det_service: Opcional, para HF model
-            
+            ignore_boxes: Opcional, bboxes [x1,y1,x2,y2] (coords do frame
+                original) de elementos passageiros (pessoas, veículos)
+                detectados pelo YOLO — ver TRANSIENT_CLASSES. Essas áreas
+                são excluídas do cálculo de alteração — alguém passando ou
+                um carro na rua não pode contar como dano/pichação no
+                monumento.
+
         Returns:
             dict: Resultado com SSIM, mudanças, alerta, HF
         """
@@ -109,8 +121,13 @@ class ChangeDetector:
         ref_img = ref_data["reference_image"]
 
         # Extrai ROI do frame atual e redimensiona para match
-        current_roi = extrair_roi(current_frame, camera_code)
+        zx1, zy1, zx2, zy2 = _zone_rect_px(current_frame, camera_code)
+        current_roi = current_frame[zy1:zy2, zx1:zx2]
+        crop_h, crop_w = current_roi.shape[:2]
         current_roi = cv2.resize(current_roi, (ref_img.shape[1], ref_img.shape[0]))
+        resized_h, resized_w = ref_img.shape[0], ref_img.shape[1]
+        scale_x = resized_w / crop_w if crop_w else 1.0
+        scale_y = resized_h / crop_h if crop_h else 1.0
 
         # ─── 1. SSIM entre ROI de referência e ROI atual ───────────
         gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_RGB2GRAY)
@@ -132,6 +149,24 @@ class ChangeDetector:
         kernel = np.ones((5, 5), np.uint8)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+        # ─── Ignora áreas passageiras (YOLO: pessoas/veículos) no cálculo ──
+        # Alguém passando ou um carro na rua muda pixels no ROI, mas isso
+        # não é dano/pichação — apaga essas regiões do mapa de diff antes
+        # de contar % alterado e regiões, e conta separadamente.
+        ignored_count = 0
+        if ignore_boxes:
+            for (px1, py1, px2, py2) in ignore_boxes:
+                ix1, iy1 = max(px1, zx1), max(py1, zy1)
+                ix2, iy2 = min(px2, zx2), min(py2, zy2)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    continue  # fora da zona do monumento
+                ignored_count += 1
+                rx1 = int((ix1 - zx1) * scale_x)
+                ry1 = int((iy1 - zy1) * scale_y)
+                rx2 = int((ix2 - zx1) * scale_x)
+                ry2 = int((iy2 - zy1) * scale_y)
+                cv2.rectangle(thresh, (rx1, ry1), (rx2, ry2), 0, -1)
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -162,6 +197,34 @@ class ChangeDetector:
             cv2.putText(highlight, f"{ch['area_percent']:.1f}%",
                         (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX,
                         0.4, (0, 0, 255), 1)
+
+        # Marca (em azul) os elementos passageiros ignorados no diff, pra
+        # deixar claro pro operador por que aquela área não entrou na % alterado
+        if ignore_boxes:
+            for (px1, py1, px2, py2) in ignore_boxes:
+                ix1, iy1 = max(px1, zx1), max(py1, zy1)
+                ix2, iy2 = min(px2, zx2), min(py2, zy2)
+                if ix2 <= ix1 or iy2 <= iy1:
+                    continue
+                rx1 = int((ix1 - zx1) * scale_x)
+                ry1 = int((iy1 - zy1) * scale_y)
+                rx2 = int((ix2 - zx1) * scale_x)
+                ry2 = int((iy2 - zy1) * scale_y)
+                cv2.rectangle(highlight, (rx1, ry1), (rx2, ry2), (255, 180, 0), 2)
+                cv2.putText(highlight, "ignorado", (rx1, max(ry1 - 5, 0)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 180, 0), 1)
+
+        ignored_alert = None
+        if ignored_count > 0:
+            ignored_alert = {
+                "level": "INFO",
+                "message": (
+                    f"👤🚗 {ignored_count} elemento(s) passageiro(s) "
+                    f"(pessoas/veículos) perto do monumento "
+                    f"(área ignorada na comparação de alteração)"
+                ),
+                "count": ignored_count,
+            }
 
         # ─── 2. Alerta baseado no SSIM ────────────────────────────
         ssim_alert_level = self._ssim_alert_level(change_pct, len(changes))
@@ -219,6 +282,8 @@ class ChangeDetector:
             "hf_prediction": hf_result,
             "alert": alert,
             "alert_level": final_level,
+            "ignored_objects_count": ignored_count,
+            "ignored_objects_alert": ignored_alert,
             "highlight_image_base64": highlight_b64,
             "history_count": len(self.change_history[camera_code]),
         }

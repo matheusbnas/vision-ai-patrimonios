@@ -41,6 +41,7 @@ class DetectionService:
         result = {
             "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
             "risk_alert": None,
+            "loitering_alert": None,
             "hf_prediction": None,
             "processing_time_ms": 0,
         }
@@ -61,6 +62,7 @@ class DetectionService:
                     "annotated_image": yolo_result.get("annotated_image"),
                 }
                 result["risk_alert"] = yolo_result.get("risk_alert")
+                result["loitering_alert"] = yolo_result.get("loitering_alert")
             except Exception as e:
                 logger.warning(f"Erro YOLO detection: {e}")
 

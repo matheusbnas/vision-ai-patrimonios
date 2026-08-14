@@ -20,7 +20,7 @@ from app.services.camera_service import CameraService
 from app.services.detection_service import DetectionService
 from app.services import zone_service, alert_service
 from app.models.change_detector import ChangeDetector
-from app.config import IMAGES_DIR
+from app.config import IMAGES_DIR, TRANSIENT_CLASSES
 from app.schemas.schemas import ZoneInput
 
 logger = logging.getLogger(__name__)
@@ -357,6 +357,18 @@ def record_risk_alert(camera_code: str, camera_name: str, risk_alert: Optional[d
         )
 
 
+def record_loitering_alert(camera_code: str, camera_name: str, loitering_alert: Optional[dict]) -> None:
+    """Registra no alert_service um alerta de permanência suspeita de pessoa, se houver."""
+    if loitering_alert:
+        alert_service.add_alert(
+            camera_code=camera_code,
+            camera_name=camera_name,
+            level=loitering_alert["level"],
+            message=loitering_alert["message"],
+            source="loitering",
+        )
+
+
 def record_ssim_alert(camera_code: str, camera_name: str, alert: Optional[dict]) -> None:
     """Registra no alert_service um alert de mudança física (SSIM), se houver."""
     if alert:
@@ -410,6 +422,7 @@ async def monitor_live(
         "timestamp": time.time(),
         "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
         "risk_alert": None,
+        "loitering_alert": None,
         "hf_prediction": None,
         "image_base64": None,
         "frame_captured": False,
@@ -437,8 +450,10 @@ async def monitor_live(
                 "total_objects": result.get("yolo_detection", {}).get("total_objects", 0),
             }
             response["risk_alert"] = result.get("risk_alert")
+            response["loitering_alert"] = result.get("loitering_alert")
             response["hf_prediction"] = result.get("hf_prediction")
             record_risk_alert(camera_code, camera_name, response["risk_alert"])
+            record_loitering_alert(camera_code, camera_name, response["loitering_alert"])
             response["snapshot_path"] = save_camera_snapshot(frame, camera_code, camera_name, "monitoramento")
             
             # Imagem anotada
@@ -480,6 +495,7 @@ async def monitor_multi(
             "success": False,
             "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
             "risk_alert": None,
+            "loitering_alert": None,
             "hf_prediction": None,
             "frame_captured": False,
         }
@@ -515,8 +531,10 @@ async def monitor_multi(
                         "total_objects": result.get("yolo_detection", {}).get("total_objects", 0),
                     }
                     cam_result["risk_alert"] = result.get("risk_alert")
+                    cam_result["loitering_alert"] = result.get("loitering_alert")
                     cam_result["hf_prediction"] = result.get("hf_prediction")
                     record_risk_alert(code, cam_name, cam_result["risk_alert"])
+                    record_loitering_alert(code, cam_name, cam_result["loitering_alert"])
             
             cam_result["success"] = True
             
@@ -793,7 +811,20 @@ async def detect_changes(
         camera_name_comp = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
         save_camera_snapshot(current_frame, camera_code, camera_name_comp, "comparacao")
 
-    result = change_detector.check(camera_code, current_frame, detection_service)
+    # Detecta elementos passageiros (pessoas/veículos, YOLO) no frame atual
+    # pra excluir essas áreas do cálculo de % alterado — alguém passando ou
+    # um carro na rua não pode virar "dano" no monumento
+    ignore_boxes = []
+    try:
+        yolo_result = detection_service.yolo_detector.detect(current_frame, camera_code=camera_code)
+        ignore_boxes = [
+            d["bbox"] for d in yolo_result.get("objects", [])
+            if d["class_name"] in TRANSIENT_CLASSES
+        ]
+    except Exception as e:
+        logger.warning(f"Erro YOLO (elementos passageiros) no change detection: {e}")
+
+    result = change_detector.check(camera_code, current_frame, detection_service, ignore_boxes=ignore_boxes)
     if not result.get("success"):
         return result
 
@@ -812,6 +843,8 @@ async def detect_changes(
         "hf_prediction": result["hf_prediction"],
         "alert": result["alert"],
         "alert_level": result["alert_level"],
+        "ignored_objects_count": result["ignored_objects_count"],
+        "ignored_objects_alert": result["ignored_objects_alert"],
         "highlight_image_base64": result["highlight_image_base64"],
     }
 

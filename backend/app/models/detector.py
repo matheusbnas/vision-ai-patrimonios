@@ -24,6 +24,7 @@ from app.config import (
     INTEREST_CLASSES,
     RISK_CLASSES,
     DWELL_ALERT_SECONDS,
+    PERSON_LOITERING_ALERT_SECONDS,
 )
 from app.services import zone_service, risk_tracker
 
@@ -108,6 +109,7 @@ class PatrimonyDetector:
                 "total_objects": 0,
                 "risk_objects": [],
                 "risk_alert": None,
+                "loitering_alert": None,
                 "processing_time_ms": 0,
             }
 
@@ -183,6 +185,35 @@ class PatrimonyDetector:
             # Nada de risco presente agora — reseta os timers dessa câmera
             risk_tracker.update(tracker_key, set())
 
+        # ─── Permanência de pessoas na zona (risco preventivo) ───────────
+        # Uma pessoa não é descartada da análise: se ela (ou alguém, já que
+        # não há reidentificação) fica parada perto do monumento por muito
+        # tempo, isso é sinal de risco iminente (furto/vandalismo), mesmo
+        # sem nenhum objeto de risco visível — vale a pena alertar antes
+        # que o dano aconteça. Usa o mesmo mecanismo de dwell do
+        # risk_tracker, mas num namespace separado pra não interferir no
+        # timer de RISK_CLASSES.
+        person_present = any(
+            d["class_name"] == "pessoa" and d["in_zone"] for d in detections
+        )
+        loitering_key = f"{tracker_key}::pessoa"
+        person_dwell = risk_tracker.update(
+            loitering_key, {"pessoa"} if person_present else set()
+        )
+        person_dwell_seconds = person_dwell.get("pessoa", 0.0)
+
+        loitering_alert = None
+        if person_present and person_dwell_seconds >= PERSON_LOITERING_ALERT_SECONDS:
+            minutos = int(person_dwell_seconds // 60)
+            loitering_alert = {
+                "level": "ALTO",
+                "message": (
+                    f"⚠️ ALTO: Pessoa parada perto do monumento há {minutos} min "
+                    f"— risco preventivo de furto/vandalismo"
+                ),
+                "dwell_seconds": round(person_dwell_seconds, 1),
+            }
+
         # ─── Desenha o quadrante e destaca objetos de risco ──────────────
         zx1, zy1, zx2, zy2 = zone
         cv2.rectangle(annotated_image, (zx1, zy1), (zx2, zy2), (0, 255, 255), 2)
@@ -201,6 +232,7 @@ class PatrimonyDetector:
             "total_objects": len(detections),
             "risk_objects": risk_objects,
             "risk_alert": risk_alert,
+            "loitering_alert": loitering_alert,
             "processing_time_ms": round(elapsed, 2),
         }
 
