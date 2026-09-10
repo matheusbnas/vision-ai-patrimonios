@@ -6,8 +6,12 @@ import type { Patrimonio, Camera as CameraType } from '../types'
 function CameraPlayer({ camera, patrimonioNome }: { camera: CameraType; patrimonioNome: string }) {
   const [live, setLive] = useState(false)
   const [error, setError] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
 
   const streamUrl = camera.stream_url
+
+  // Sem recarregamento automático do iframe — só manual, pelo botão
+  // "🔄 Recarregar" ou "🔗 Pop-up" numa janela separada.
 
   return (
     <div className="bg-black rounded-xl overflow-hidden border border-gray-700 flex flex-col">
@@ -21,6 +25,27 @@ function CameraPlayer({ camera, patrimonioNome }: { camera: CameraType; patrimon
           )}
         </div>
         <div className="flex items-center gap-2">
+          {streamUrl && (
+            <>
+              <button
+                onClick={() => {
+                  setLive(false)
+                  setReloadKey((k) => k + 1)
+                }}
+                className="text-xs px-2 py-0.5 rounded bg-white/10 hover:bg-white/20"
+                title="Força uma tentativa de conexão nova, sem sair da tela"
+              >
+                🔄 Recarregar
+              </button>
+              <button
+                onClick={() => window.open(streamUrl, `camera-${camera.code}`, 'width=420,height=340,noopener,noreferrer')}
+                className="text-xs px-2 py-0.5 rounded bg-white/10 hover:bg-white/20"
+                title="Abre a URL real da Tixxi numa janela separada"
+              >
+                🔗 Pop-up
+              </button>
+            </>
+          )}
           {live && <span className="text-xs text-red-400 font-medium">🔴 AO VIVO</span>}
         </div>
       </div>
@@ -30,6 +55,7 @@ function CameraPlayer({ camera, patrimonioNome }: { camera: CameraType; patrimon
         {streamUrl ? (
           <>
             <iframe
+              key={reloadKey}
               src={streamUrl}
               className="absolute inset-0 w-full h-full border-none"
               allow="accelerometer;autoplay;encrypted-media;gyroscope"

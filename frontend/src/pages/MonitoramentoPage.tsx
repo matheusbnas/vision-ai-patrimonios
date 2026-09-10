@@ -13,6 +13,7 @@ import {
 import { api } from '../api/client'
 import type { Patrimonio } from '../types'
 import ZoneCalibrator from '../components/ZoneCalibrator'
+import HlsVideoPlayer from '../components/HlsVideoPlayer'
 
 interface DetectionFrame {
   camera_code: string
@@ -148,6 +149,11 @@ export default function MonitoramentoPage() {
   const [patrimonios, setPatrimonios] = useState<Patrimonio[]>([])
   const [selectedCodes, setSelectedCodes] = useState<string[]>([])
   const [streamUrls, setStreamUrls] = useState<Record<string, string>>({})
+  // URL HLS por câmera (protocolo real da conta na Tixxi) — quando disponível,
+  // usa o player <video>+hls.js em vez do iframe WebRTC.
+  const [hlsUrls, setHlsUrls] = useState<Record<string, string>>({})
+  // Câmeras cujo HLS falhou (erro fatal do hls.js) — caem de volta pro iframe.
+  const [hlsFailed, setHlsFailed] = useState<Record<string, boolean>>({})
   const [cameraNames, setCameraNames] = useState<Record<string, string>>({})
   // Nome de cada câmera individual (independe de seleção) — usado pra rotular
   // os chips quando um patrimônio tem mais de uma câmera disponível.
@@ -157,6 +163,20 @@ export default function MonitoramentoPage() {
   const [loading, setLoading] = useState(false)
   const [streamErrors, setStreamErrors] = useState<Record<string, boolean>>({})
   const [calibratingCode, setCalibratingCode] = useState<string | null>(null)
+  // O player da Tixxi (iframe) só reconecta sozinho em falha de rede/504 —
+  // em erro 400 ("codecs not supported by client", o mais comum) ele desiste
+  // e fica preto pra sempre. Esse contador força um reload completo do
+  // iframe (nova tentativa de conexão) — por clique manual no botão
+  // "🔄 Recarregar" ou automaticamente quando o backend confirma que a
+  // câmera está sem vídeo (ver useEffect de polling do status abaixo).
+  const [manualReload, setManualReload] = useState<Record<string, number>>({})
+  // Resultado do "print" puro por câmera (sem YOLO/HF) — só pra checar
+  // rapidamente se a câmera está entregando vídeo, isolado da IA.
+  const [snapshots, setSnapshots] = useState<Record<string, {
+    loading: boolean
+    image?: string
+    error?: string
+  }>>({})
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const runningRef = useRef(false)
 
@@ -186,11 +206,15 @@ export default function MonitoramentoPage() {
       if (data.success) {
         const urls: Record<string, string> = {}
         const names: Record<string, string> = {}
+        const hls: Record<string, string> = {}
         for (const cam of data.cameras) {
           if (cam.stream_url) urls[cam.camera_code] = cam.stream_url
+          if (cam.hls_url) hls[cam.camera_code] = cam.hls_url
           names[cam.camera_code] = cam.camera_name
         }
         setStreamUrls(urls)
+        setHlsUrls(hls)
+        setHlsFailed({})
         setCameraNames(names)
       }
     } catch (err) {
@@ -241,6 +265,34 @@ export default function MonitoramentoPage() {
       setCameraNames({})
     }
   }, [selectedCodes, fetchStreamUrls])
+
+  // Sem recarregamento automático do iframe — só manual, pelo botão
+  // "🔄 Recarregar" em cada câmera (ou "🔗 Pop-up" numa janela separada).
+
+  // Print puro de uma câmera — só captura e salva, sem YOLO/HF. Usado pra
+  // checar rapidamente se a câmera está entregando vídeo de verdade.
+  const handleSnapshot = useCallback(async (code: string) => {
+    setSnapshots((s) => ({ ...s, [code]: { loading: true } }))
+    try {
+      const data = await api.captureSnapshot(code)
+      if (data.success) {
+        setSnapshots((s) => ({ ...s, [code]: { loading: false, image: data.image_base64 } }))
+      } else {
+        setSnapshots((s) => ({ ...s, [code]: { loading: false, error: data.error || 'Falha ao capturar' } }))
+      }
+    } catch (err) {
+      setSnapshots((s) => ({ ...s, [code]: { loading: false, error: 'Erro na requisição' } }))
+    }
+  }, [])
+
+  // Abre a URL real da câmera (direto da Tixxi, sem nenhuma camada nossa)
+  // numa janela pop-up separada — útil pra testar/assistir isolado do resto
+  // do app, e pra dar F5 manualmente quando o player travar.
+  const openPopup = useCallback((code: string) => {
+    const url = streamUrls[code]
+    if (!url) return
+    window.open(url, `camera-${code}`, 'width=420,height=340,noopener,noreferrer')
+  }, [streamUrls])
 
   // Escaneia detecções (stream já roda separado no iframe)
   const scan = useCallback(async () => {
@@ -519,6 +571,33 @@ export default function MonitoramentoPage() {
                         <span className="opacity-60">cód. {code}</span>
                       </div>
                       <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            setStreamErrors((s) => ({ ...s, [code]: false }))
+                            setManualReload((m) => ({ ...m, [code]: (m[code] || 0) + 1 }))
+                          }}
+                          disabled={!streamUrls[code]}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
+                          title="Força uma tentativa de conexão nova, sem sair da tela"
+                        >
+                          🔄 Recarregar
+                        </button>
+                        <button
+                          onClick={() => openPopup(code)}
+                          disabled={!streamUrls[code]}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
+                          title="Abre a URL real da Tixxi numa janela separada"
+                        >
+                          🔗 Pop-up
+                        </button>
+                        <button
+                          onClick={() => handleSnapshot(code)}
+                          disabled={snapshots[code]?.loading}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
+                          title="Print puro da câmera, sem IA"
+                        >
+                          {snapshots[code]?.loading ? '⏳' : '📸'} Print
+                        </button>
                         {running && <span className="status-dot online" />}
                         {frame?.processing_time_ms != null && (
                           <span className="opacity-60 text-[10px]">
@@ -530,16 +609,26 @@ export default function MonitoramentoPage() {
 
                     {/* Stream ao vivo + overlay — ocupa a maior parte da tela */}
                     <div className="relative bg-black flex-1" style={{ minHeight: selectedCodes.length > 4 ? '240px' : '420px' }}>
-                      {/* Iframe do stream Tixxi com JWT real vindo da API */}
-                      <iframe
-                        key={code}
-                        src={streamUrls[code]}
-                        className="absolute inset-0 w-full h-full border-none"
-                        allow="accelerometer;autoplay;encrypted-media;gyroscope"
-                        allowFullScreen
-                        onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
-                        onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
-                      />
+                      {/* HLS (protocolo real da conta na Tixxi) quando disponível;
+                          cai pro iframe WebRTC se não tiver HLS ou se ele falhar */}
+                      {hlsUrls[code] && !hlsFailed[code] ? (
+                        <HlsVideoPlayer
+                          key={`hls-${code}`}
+                          src={hlsUrls[code]}
+                          className="absolute inset-0 w-full h-full"
+                          onError={() => setHlsFailed((s) => ({ ...s, [code]: true }))}
+                        />
+                      ) : (
+                        <iframe
+                          key={`iframe-${code}-${manualReload[code] || 0}`}
+                          src={streamUrls[code]}
+                          className="absolute inset-0 w-full h-full border-none"
+                          allow="accelerometer;autoplay;encrypted-media;gyroscope"
+                          allowFullScreen
+                          onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
+                          onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
+                        />
+                      )}
                       {/* Overlay com imagem anotada do YOLO (quando disponível) */}
                       {frame?.image_base64 && (
                         <img
@@ -587,6 +676,23 @@ export default function MonitoramentoPage() {
 
                     {/* Painel de análise - SSIM + HF */}
                     <div className="p-3 space-y-2 text-xs">
+                      {/* Resultado do "Print" puro (sem IA) — checagem rápida de vídeo */}
+                      {snapshots[code] && !snapshots[code].loading && (
+                        <div className={`rounded-lg p-2 ${snapshots[code].error ? 'bg-red-50' : 'bg-green-50'}`}>
+                          {snapshots[code].error ? (
+                            <p className="text-[10px] text-red-700">📸 Print falhou: {snapshots[code].error}</p>
+                          ) : (
+                            <>
+                              <p className="text-[10px] text-green-700 font-medium mb-1">📸 Print capturado (sem IA):</p>
+                              <img
+                                src={`data:image/jpeg;base64,${snapshots[code].image}`}
+                                alt={`Print ${code}`}
+                                className="w-full rounded border border-green-200"
+                              />
+                            </>
+                          )}
+                        </div>
+                      )}
                       {/* Alerta preditivo (YOLO — objeto de risco no quadrante) */}
                       {frame?.risk_alert && (
                         <div className="rounded-lg p-2 flex items-center gap-2 bg-red-100 text-red-800 animate-pulse">

@@ -164,7 +164,11 @@ class CameraService:
                     data = json.load(f)
                 cached = data.get("cameras", [])
                 cache_time = data.get("time", 0)
-                if cached and (time.time() - cache_time) < 3600:  # 1h de cache
+                # 1h de validade real do KEY de cada câmera, com margem de 5min —
+                # sem essa margem, o cache "válido" por 1h expira no MESMO instante
+                # que as KEYs de stream, e uma leitura na borda serve dados já
+                # rejeitados pela Tixxi ("Acesso negado: Token expirado").
+                if cached and (time.time() - cache_time) < 3300:  # 55min
                     return cached
         except Exception as e:
             logger.warning(f"Erro ao ler cache: {e}")

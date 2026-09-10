@@ -11,6 +11,7 @@ GET /api/alerts.
 
 import asyncio
 import logging
+import time
 
 from app.config import (
     PATRIMONIOS,
@@ -20,6 +21,17 @@ from app.config import (
 from app.api import monitor as monitor_api
 
 logger = logging.getLogger(__name__)
+
+# Último resultado de captura por câmera — permite ao frontend saber se uma
+# câmera está entregando vídeo de verdade agora, sem precisar de uma captura
+# nova (reusa o que esse loop já faz a cada 20s) nem de acessar o iframe
+# (que é de outra origem, então JS não consegue inspecionar o conteúdo dele).
+_camera_status: dict[str, dict] = {}
+
+
+def get_camera_status() -> dict[str, dict]:
+    """Cópia do último resultado de captura de cada câmera monitorada."""
+    return {code: dict(status) for code, status in _camera_status.items()}
 
 
 def _all_camera_codes() -> list[str]:
@@ -44,7 +56,8 @@ def _process_camera(code: str) -> None:
         logger.debug(f"[background_monitor] Sem stream_url pra câmera {code}, pulando")
         return
 
-    frame = monitor_api.capture_frame(stream_url, 15.0)
+    frame = monitor_api.capture_frame(stream_url, 15.0, camera_code=code)
+    _camera_status[code] = {"has_video": frame is not None, "checked_at": time.time()}
     if frame is None:
         logger.debug(f"[background_monitor] Falha ao capturar frame da câmera {code}")
         return

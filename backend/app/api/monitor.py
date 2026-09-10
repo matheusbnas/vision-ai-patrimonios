@@ -130,13 +130,26 @@ _STREAM_ERROR_BG_BGR = np.array([26, 20, 14])
 
 
 def _is_stream_error_frame(frame_rgb: np.ndarray) -> bool:
-    """Detecta se o frame capturado é a tela de erro/reconectando do player, não vídeo real."""
+    """Detecta se o frame capturado é a tela de erro do player, não vídeo real.
+
+    Cobre dois casos: (1) a tela de "Reconectando..." (cor de fundo conhecida)
+    e (2) qualquer outra tela de erro do player sobre fundo preto — ex.: a
+    mensagem "codecs not supported by client" (erro de negociação WebRTC) —
+    que renderiza como texto branco/cinza sobre um fundo quase todo preto.
+    Câmeras de rua monitoradas aqui são todas externas/iluminadas, então
+    vídeo real nunca fica com >90% dos pixels quase pretos (brilho médio
+    ~4-5, como confirmado nos frames de erro reais salvos em produção).
+    """
     bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
     dist = np.linalg.norm(bgr.astype(int) - _STREAM_ERROR_BG_BGR, axis=2)
-    return (dist < 15).mean() > 0.5
+    if (dist < 15).mean() > 0.5:
+        return True
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    return (gray < 20).mean() > 0.9
 
 
-def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.ndarray]:
+def capture_frame(stream_url: str, timeout_sec: float = 10.0,
+                   camera_code: Optional[str] = None) -> Optional[np.ndarray]:
     """
     Captura um frame REAL do stream da câmera.
     
@@ -154,6 +167,32 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.nda
     import io
     from PIL import Image
 
+    # ─── Tentativa 0: HLS direto (sem navegador) ───────────────────
+    # OpenCV/ffmpeg decodificam HLS nativamente (inclusive H.265), sem as
+    # limitações de codec do WebRTC no navegador. Bem mais rápido e confiável
+    # que a captura via Playwright quando disponível.
+    if camera_code and camera_service:
+        try:
+            hls_url = camera_service.get_stream_url(camera_code)
+        except Exception:
+            hls_url = None
+        if hls_url:
+            try:
+                cap = cv2.VideoCapture(hls_url)
+                start = time.time()
+                frame = None
+                while time.time() - start < timeout_sec:
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        break
+                    time.sleep(0.1)
+                cap.release()
+                if frame is not None:
+                    logger.info("✅ HLS: frame capturado com sucesso (sem navegador)!")
+                    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            except Exception as e:
+                logger.warning(f"HLS direto falhou: {e}")
+
     # ─── Tentativa 1: Playwright (Chromium headless) ──────────────
     # O stream é HTML/JS (exibido em iframe no frontend).
     # Playwright renderiza a página e tira screenshot do vídeo/canvas.
@@ -165,22 +204,27 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.nda
             current_url = stream_url
             
             with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                    ],
-                )
+                try:
+                    # Google Chrome de verdade — confirmado que negocia e decodifica
+                    # H.265 no WebRTC (codec real das câmeras da Tixxi). O Chromium
+                    # padrão do Playwright e o Edge NÃO oferecem H.265, e o servidor
+                    # rejeita a negociação com "codecs not supported by client".
+                    # SEM --disable-gpu: decodificação de H.265 depende de aceleração
+                    # de hardware — desabilitar a GPU faz a negociação passar mas o
+                    # vídeo nunca renderiza (trava na tela de "Reconectando").
+                    browser = p.chromium.launch(
+                        channel="chrome",
+                        headless=True,
+                        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+                    )
+                except Exception:
+                    logger.warning("Chrome não encontrado, usando Chromium padrão do Playwright (sem H.265)")
+                    browser = p.chromium.launch(
+                        headless=True,
+                        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                    )
                 context = browser.new_context(
                     viewport={"width": 800, "height": 600},
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
                     locale="pt-BR",
                     bypass_csp=True,
                 )
@@ -228,8 +272,22 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0) -> Optional[np.nda
                         v.play().catch(() => {});
                     }
                 }""")
-                page.wait_for_timeout(3000)
-                
+                # H.265 (codec real das câmeras) tem tempo de negociação/decode do
+                # primeiro frame bem mais variável que VP8/H264 — uma espera fixa
+                # falha de forma inconsistente (às vezes 3s bastam, às vezes não).
+                # Faz polling ativo até o <video> ter dimensões reais (frame decodificado)
+                # em vez de uma pausa fixa, com um teto maior pra dar tempo à negociação.
+                has_video_data = page.evaluate("""async () => {
+                    for (let i = 0; i < 40; i++) {
+                        const v = document.querySelector("video");
+                        if (v && v.videoWidth > 0 && v.videoHeight > 0) return true;
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+                    return false;
+                }""")
+                if not has_video_data:
+                    logger.warning(f"Playwright: vídeo não decodificou a tempo (tentativa {tentativa+1})")
+
                 # Screenshot
                 screenshot = page.screenshot(type="jpeg", quality=90)
                 browser.close()
@@ -433,7 +491,7 @@ async def monitor_live(
         try:
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(capture_frame, stream_url, 15.0)
+                future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
                 frame = future.result(timeout=20)
         except Exception:
             frame = None
@@ -513,7 +571,7 @@ async def monitor_multi(
                 try:
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as pool:
-                        future = pool.submit(capture_frame, stream_url, 15.0)
+                        future = pool.submit(capture_frame, stream_url, 15.0, code)
                         frame = future.result(timeout=20)
                 except Exception:
                     frame = None
@@ -622,11 +680,46 @@ async def get_streams(
         if not stream_url:
             stream_url = camera_service.get_stream_url(code)
 
+        # URL HLS (protocolo real da nossa conta na Tixxi) — usada pelo player
+        # <video>+hls.js do frontend. stream_url (WebRTC) fica só como fallback
+        # pro iframe antigo enquanto o HLS não estiver 100% liberado pela Tixxi.
+        try:
+            hls_url = camera_service.get_stream_url(code)
+        except Exception:
+            hls_url = None
+
         result.append({
             "camera_code": code,
             "camera_name": name,
             "stream_url": stream_url or "",
+            "hls_url": hls_url or "",
         })
+
+    return {"success": True, "cameras": result}
+
+
+@router.get("/camera-status")
+async def get_camera_status(
+    codes: str = Query(..., description="Códigos separados por vírgula"),
+):
+    """
+    Status de vídeo por câmera, baseado no último resultado do monitoramento
+    em background (não dispara captura nova) — usado pelo frontend pra
+    decidir se recarrega o iframe (que é de outra origem, então JS não
+    consegue inspecionar o conteúdo dele diretamente).
+    """
+    from app.services import background_monitor
+
+    status = background_monitor.get_camera_status()
+    camera_codes = [c.strip() for c in codes.split(",") if c.strip()]
+
+    result = {}
+    for code in camera_codes:
+        info = status.get(code)
+        result[code] = {
+            "has_video": info["has_video"] if info else None,  # None = ainda não checado
+            "checked_at": info["checked_at"] if info else None,
+        }
 
     return {"success": True, "cameras": result}
 
@@ -657,7 +750,7 @@ async def capture_snapshot(
         raise HTTPException(status_code=400, detail="Câmera não possui stream URL")
     
     # Captura frame real (sem fallback sintético)
-    frame = capture_frame(stream_url, timeout_sec=20.0)
+    frame = capture_frame(stream_url, timeout_sec=20.0, camera_code=camera_code)
     
     if frame is None:
         return {
@@ -720,7 +813,7 @@ async def set_reference(
             try:
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 15.0)
+                    future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
                     frame = future.result(timeout=20)
             except Exception:
                 pass
@@ -780,7 +873,7 @@ async def detect_changes(
                 try:
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as pool:
-                        future = pool.submit(capture_frame, stream_url, 15.0)
+                        future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
                         ref_frame = future.result(timeout=20)
                 except Exception:
                     pass
@@ -797,7 +890,7 @@ async def detect_changes(
             try:
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 15.0)
+                    future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
                     current_frame = future.result(timeout=20)
             except Exception:
                 pass
@@ -896,7 +989,7 @@ async def get_zone_frame(camera_code: str):
             try:
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 15.0)
+                    future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
                     frame = future.result(timeout=20)
             except Exception:
                 pass

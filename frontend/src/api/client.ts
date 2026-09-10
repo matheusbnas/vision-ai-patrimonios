@@ -92,6 +92,26 @@ class ApiClient {
     return data
   }
 
+  // Status de vídeo por câmera (do monitoramento em background, sem captura
+  // nova) — usado pra só recarregar o iframe quando a câmera está sem vídeo.
+  async getCameraStatus(codes: string[]) {
+    const { data } = await this.http.get('/api/monitor/camera-status', {
+      params: { codes: codes.join(',') },
+      timeout: 15000,
+    })
+    return data
+  }
+
+  // Print puro da câmera — só captura e salva o frame, sem YOLO/HF.
+  // Usado pra checar rapidamente se uma câmera está entregando vídeo,
+  // isolado do pipeline de IA.
+  async captureSnapshot(code: string) {
+    const { data } = await this.http.post(`/api/monitor/snapshot/${code}`, null, {
+      timeout: 30000,
+    })
+    return data
+  }
+
   // Demonstração: gera cena sintética e executa pipeline completo
   async monitorDemo(cenario = 'depredacao', cameraCode = '001175') {
     const { data } = await this.http.get('/api/monitor/demo', {
