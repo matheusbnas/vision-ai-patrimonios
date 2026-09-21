@@ -7,11 +7,36 @@ function CameraPlayer({ camera, patrimonioNome }: { camera: CameraType; patrimon
   const [live, setLive] = useState(false)
   const [error, setError] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
+  // Sobrescreve camera.stream_url quando o botão "Recarregar" busca uma URL
+  // nova (KEY renovada) — undefined até a primeira renovação, cai no valor
+  // original vindo por prop.
+  const [freshStreamUrl, setFreshStreamUrl] = useState<string | undefined>(undefined)
 
-  const streamUrl = camera.stream_url
+  const streamUrl = freshStreamUrl || camera.stream_url
+
+  // Reseta a URL renovada se a câmera exibida mudar (evita misturar URL de
+  // uma câmera com o código de outra ao trocar de seleção).
+  useEffect(() => {
+    setFreshStreamUrl(undefined)
+  }, [camera.code])
 
   // Sem recarregamento automático do iframe — só manual, pelo botão
-  // "🔄 Recarregar" ou "🔗 Pop-up" numa janela separada.
+  // "🔄 Recarregar" (busca uma stream_url nova antes de recarregar, pra
+  // cobrir o caso da KEY ter expirado — ~1h de validade) ou "🔗 Pop-up".
+  const handleReload = async () => {
+    if (camera.code) {
+      try {
+        const data = await api.getStreams([camera.code])
+        if (data.success && data.cameras[0]?.stream_url) {
+          setFreshStreamUrl(data.cameras[0].stream_url)
+        }
+      } catch (err) {
+        console.error('Erro ao renovar stream_url:', err)
+      }
+    }
+    setLive(false)
+    setReloadKey((k) => k + 1)
+  }
 
   return (
     <div className="bg-black rounded-xl overflow-hidden border border-gray-700 flex flex-col">
@@ -28,21 +53,25 @@ function CameraPlayer({ camera, patrimonioNome }: { camera: CameraType; patrimon
           {streamUrl && (
             <>
               <button
-                onClick={() => {
-                  setLive(false)
-                  setReloadKey((k) => k + 1)
-                }}
+                onClick={handleReload}
                 className="text-xs px-2 py-0.5 rounded bg-white/10 hover:bg-white/20"
-                title="Força uma tentativa de conexão nova, sem sair da tela"
+                title="Busca uma URL nova (KEY renovada) e força uma tentativa de conexão"
               >
                 🔄 Recarregar
               </button>
               <button
                 onClick={() => window.open(streamUrl, `camera-${camera.code}`, 'width=420,height=340,noopener,noreferrer')}
                 className="text-xs px-2 py-0.5 rounded bg-white/10 hover:bg-white/20"
-                title="Abre a URL real da Tixxi numa janela separada"
+                title="Abre a URL real da Tixxi numa janela pop-up pequena"
               >
                 🔗 Pop-up
+              </button>
+              <button
+                onClick={() => window.open(streamUrl, '_blank', 'noopener,noreferrer')}
+                className="text-xs px-2 py-0.5 rounded bg-white/10 hover:bg-white/20"
+                title="Abre a URL real da Tixxi em uma nova aba do navegador"
+              >
+                🔗 Nova aba
               </button>
             </>
           )}

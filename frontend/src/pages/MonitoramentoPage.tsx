@@ -166,9 +166,9 @@ export default function MonitoramentoPage() {
   // O player da Tixxi (iframe) só reconecta sozinho em falha de rede/504 —
   // em erro 400 ("codecs not supported by client", o mais comum) ele desiste
   // e fica preto pra sempre. Esse contador força um reload completo do
-  // iframe (nova tentativa de conexão) — por clique manual no botão
-  // "🔄 Recarregar" ou automaticamente quando o backend confirma que a
-  // câmera está sem vídeo (ver useEffect de polling do status abaixo).
+  // iframe (nova tentativa de conexão) — só por clique manual no botão
+  // "🔄 Recarregar" (ver reloadCamera), que também busca uma stream_url
+  // nova antes de recarregar, cobrindo o caso da KEY ter expirado (~1h).
   const [manualReload, setManualReload] = useState<Record<string, number>>({})
   // Resultado do "print" puro por câmera (sem YOLO/HF) — só pra checar
   // rapidamente se a câmera está entregando vídeo, isolado da IA.
@@ -293,6 +293,35 @@ export default function MonitoramentoPage() {
     if (!url) return
     window.open(url, `camera-${code}`, 'width=420,height=340,noopener,noreferrer')
   }, [streamUrls])
+
+  // Mesma URL do pop-up, mas em uma aba cheia do navegador em vez de uma
+  // janela pequena — útil pra assistir a câmera em tela grande.
+  const openNewTab = useCallback((code: string) => {
+    const url = streamUrls[code]
+    if (!url) return
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }, [streamUrls])
+
+  // Botão "🔄 Recarregar": busca uma stream_url NOVA do backend (a KEY de
+  // cada câmera vence em ~1h — recarregar a mesma URL não resolve se ela já
+  // expirou) e só então força o iframe a recarregar. Usa merge no estado em
+  // vez de fetchStreamUrls (que substitui a lista inteira) pra não apagar as
+  // outras câmeras do grid.
+  const reloadCamera = useCallback(async (code: string) => {
+    try {
+      const data = await api.getStreams([code])
+      if (data.success && data.cameras[0]) {
+        const cam = data.cameras[0]
+        if (cam.stream_url) setStreamUrls((s) => ({ ...s, [code]: cam.stream_url }))
+        if (cam.hls_url) setHlsUrls((h) => ({ ...h, [code]: cam.hls_url }))
+        setHlsFailed((f) => ({ ...f, [code]: false }))
+      }
+    } catch (err) {
+      console.error('Erro ao renovar stream_url:', err)
+    }
+    setStreamErrors((s) => ({ ...s, [code]: false }))
+    setManualReload((m) => ({ ...m, [code]: (m[code] || 0) + 1 }))
+  }, [])
 
   // Escaneia detecções (stream já roda separado no iframe)
   const scan = useCallback(async () => {
@@ -572,13 +601,10 @@ export default function MonitoramentoPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => {
-                            setStreamErrors((s) => ({ ...s, [code]: false }))
-                            setManualReload((m) => ({ ...m, [code]: (m[code] || 0) + 1 }))
-                          }}
+                          onClick={() => reloadCamera(code)}
                           disabled={!streamUrls[code]}
                           className="text-[10px] px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
-                          title="Força uma tentativa de conexão nova, sem sair da tela"
+                          title="Busca uma URL nova (KEY renovada) e força uma tentativa de conexão"
                         >
                           🔄 Recarregar
                         </button>
@@ -586,9 +612,17 @@ export default function MonitoramentoPage() {
                           onClick={() => openPopup(code)}
                           disabled={!streamUrls[code]}
                           className="text-[10px] px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
-                          title="Abre a URL real da Tixxi numa janela separada"
+                          title="Abre a URL real da Tixxi numa janela pop-up pequena"
                         >
                           🔗 Pop-up
+                        </button>
+                        <button
+                          onClick={() => openNewTab(code)}
+                          disabled={!streamUrls[code]}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
+                          title="Abre a URL real da Tixxi em uma nova aba do navegador"
+                        >
+                          🔗 Nova aba
                         </button>
                         <button
                           onClick={() => handleSnapshot(code)}
