@@ -1,20 +1,61 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import net from 'net'
 
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    host: true,
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/health': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
+const START_PORT = 5173
+
+// Checagem por CONEXÃO (cliente), não por bind (servidor): no Windows, dois
+// processos conseguem fazer bind na mesma porta sem erro (falta de
+// SO_EXCLUSIVEADDRUSE), então net.createServer().listen() mente dizendo que
+// a porta está livre mesmo com outro processo já escutando nela. Tentar
+// conectar como cliente é o jeito confiável de saber se alguém já responde
+// naquela porta.
+function isPortInUse(port: number, host = '127.0.0.1'): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket()
+    const done = (result: boolean) => {
+      socket.destroy()
+      resolve(result)
+    }
+    socket.setTimeout(500)
+    socket.once('connect', () => done(true))
+    socket.once('timeout', () => done(false))
+    socket.once('error', () => done(false))
+    socket.connect(port, host)
+  })
+}
+
+async function findAvailablePort(startPort: number, maxAttempts = 10): Promise<number> {
+  for (let port = startPort; port < startPort + maxAttempts; port++) {
+    if (!(await isPortInUse(port))) {
+      if (port !== startPort) {
+        console.log(`⚠️  Porta ${startPort} já está em uso — subindo em ${port} no lugar`)
+      }
+      return port
+    }
+  }
+  throw new Error(`Nenhuma porta livre entre ${startPort} e ${startPort + maxAttempts - 1}`)
+}
+
+export default defineConfig(async () => {
+  const port = await findAvailablePort(START_PORT)
+
+  return {
+    plugins: [react()],
+    server: {
+      host: true,
+      port,
+      strictPort: true,
+      proxy: {
+        '/api': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
+        '/health': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
       },
     },
-  },
+  }
 })

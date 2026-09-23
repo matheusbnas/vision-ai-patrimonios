@@ -693,6 +693,10 @@ async def get_streams(
             "camera_name": name,
             "stream_url": stream_url or "",
             "hls_url": hls_url or "",
+            # "html" (página com player, precisa de <iframe>) ou "raw" (MJPEG
+            # puro, precisa de <img>) — vem direto da Tixxi, indica como
+            # renderizar stream_url no frontend.
+            "stream_type": (camera.get("stream_type") if camera else None) or "html",
         })
 
     return {"success": True, "cameras": result}

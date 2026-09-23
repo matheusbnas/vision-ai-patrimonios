@@ -154,6 +154,9 @@ export default function MonitoramentoPage() {
   const [hlsUrls, setHlsUrls] = useState<Record<string, string>>({})
   // Câmeras cujo HLS falhou (erro fatal do hls.js) — caem de volta pro iframe.
   const [hlsFailed, setHlsFailed] = useState<Record<string, boolean>>({})
+  // Tipo do stream_url por câmera, vindo direto da Tixxi: "html" (página com
+  // player, precisa de <iframe>) ou "raw" (MJPEG puro, precisa de <img>).
+  const [streamTypes, setStreamTypes] = useState<Record<string, string>>({})
   const [cameraNames, setCameraNames] = useState<Record<string, string>>({})
   // Nome de cada câmera individual (independe de seleção) — usado pra rotular
   // os chips quando um patrimônio tem mais de uma câmera disponível.
@@ -207,15 +210,18 @@ export default function MonitoramentoPage() {
         const urls: Record<string, string> = {}
         const names: Record<string, string> = {}
         const hls: Record<string, string> = {}
+        const types: Record<string, string> = {}
         for (const cam of data.cameras) {
           if (cam.stream_url) urls[cam.camera_code] = cam.stream_url
           if (cam.hls_url) hls[cam.camera_code] = cam.hls_url
           names[cam.camera_code] = cam.camera_name
+          types[cam.camera_code] = cam.stream_type || 'html'
         }
         setStreamUrls(urls)
         setHlsUrls(hls)
         setHlsFailed({})
         setCameraNames(names)
+        setStreamTypes(types)
       }
     } catch (err) {
       console.error('Erro ao buscar URLs dos streams:', err)
@@ -314,6 +320,7 @@ export default function MonitoramentoPage() {
         const cam = data.cameras[0]
         if (cam.stream_url) setStreamUrls((s) => ({ ...s, [code]: cam.stream_url }))
         if (cam.hls_url) setHlsUrls((h) => ({ ...h, [code]: cam.hls_url }))
+        setStreamTypes((t) => ({ ...t, [code]: cam.stream_type || 'html' }))
         setHlsFailed((f) => ({ ...f, [code]: false }))
       }
     } catch (err) {
@@ -643,8 +650,14 @@ export default function MonitoramentoPage() {
 
                     {/* Stream ao vivo + overlay — ocupa a maior parte da tela */}
                     <div className="relative bg-black flex-1" style={{ minHeight: selectedCodes.length > 4 ? '240px' : '420px' }}>
-                      {/* HLS (protocolo real da conta na Tixxi) quando disponível;
-                          cai pro iframe WebRTC se não tiver HLS ou se ele falhar */}
+                      {/* HLS (protocolo real da conta na Tixxi) quando disponível; cai
+                          pro stream_url conforme o stream_type que a própria Tixxi
+                          reporta: "raw" é MJPEG puro (multipart/x-mixed-replace) e usa
+                          <img>; "html" é uma página com player e usa <iframe>.
+                          referrerPolicy="no-referrer" é essencial nos dois: o servidor
+                          da câmera rejeita ("Câmera não encontrada") quando vê o Referer
+                          da nossa página — os botões Pop-up/Nova aba só funcionam porque
+                          window.open usa noreferrer e não manda esse header. */}
                       {hlsUrls[code] && !hlsFailed[code] ? (
                         <HlsVideoPlayer
                           key={`hls-${code}`}
@@ -652,10 +665,21 @@ export default function MonitoramentoPage() {
                           className="absolute inset-0 w-full h-full"
                           onError={() => setHlsFailed((s) => ({ ...s, [code]: true }))}
                         />
+                      ) : streamTypes[code] === 'raw' ? (
+                        <img
+                          key={`mjpeg-${code}-${manualReload[code] || 0}`}
+                          src={streamUrls[code]}
+                          alt={`Stream ao vivo ${code}`}
+                          referrerPolicy="no-referrer"
+                          className="absolute inset-0 w-full h-full object-contain"
+                          onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
+                          onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
+                        />
                       ) : (
                         <iframe
                           key={`iframe-${code}-${manualReload[code] || 0}`}
                           src={streamUrls[code]}
+                          referrerPolicy="no-referrer"
                           className="absolute inset-0 w-full h-full border-none"
                           allow="accelerometer;autoplay;encrypted-media;gyroscope"
                           allowFullScreen
