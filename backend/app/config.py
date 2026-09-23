@@ -32,6 +32,10 @@ STREAM_BASE_URL = os.getenv("STREAM_BASE_URL", "http://10.50.3.11:5002")
 STREAM_ENDPOINT = "/stream"
 STREAM_KEY = os.getenv("STREAM_KEY", "")
 
+# Servidor da página de vídeo WebRTC/WHEP da Tixxi (stream_type="html").
+# Usado pelo proxy em app/api/video_proxy.py — ver comentário lá do porquê.
+VIDEO_PAGE_BASE_URL = os.getenv("VIDEO_PAGE_BASE_URL", "http://10.50.3.11:5001")
+
 # ─── Servidor FastAPI ────────────────────────────────────────────
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))

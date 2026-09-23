@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Search, MapPin, Shield, Camera, Maximize2, Minimize2, AlertCircle, Wifi, WifiOff } from 'lucide-react'
-import { api } from '../api/client'
+import { api, toProxiedVideoUrl } from '../api/client'
 import type { Patrimonio, Camera as CameraType } from '../types'
 
 function CameraPlayer({ camera, patrimonioNome }: { camera: CameraType; patrimonioNome: string }) {
@@ -83,15 +83,32 @@ function CameraPlayer({ camera, patrimonioNome }: { camera: CameraType; patrimon
       <div className="relative bg-black flex-1" style={{ minHeight: '480px' }}>
         {streamUrl ? (
           <>
-            <iframe
-              key={reloadKey}
-              src={streamUrl}
-              className="absolute inset-0 w-full h-full border-none"
-              allow="accelerometer;autoplay;encrypted-media;gyroscope"
-              allowFullScreen
-              onLoad={() => setLive(true)}
-              onError={() => setError(true)}
-            />
+            {/* stream_type "raw" é MJPEG puro (usa <img>); "html" é a página
+                WebRTC (WHEP) da Tixxi — precisa passar pelo nosso backend
+                (toProxiedVideoUrl) pra funcionar embutida num <iframe>, ver
+                video_proxy.py. */}
+            {camera.stream_type === 'raw' ? (
+              <img
+                key={reloadKey}
+                src={streamUrl}
+                alt={`Stream ao vivo ${camera.code}`}
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full object-contain"
+                onLoad={() => setLive(true)}
+                onError={() => setError(true)}
+              />
+            ) : (
+              <iframe
+                key={reloadKey}
+                src={toProxiedVideoUrl(streamUrl)}
+                referrerPolicy="no-referrer"
+                className="absolute inset-0 w-full h-full border-none"
+                allow="accelerometer;autoplay;encrypted-media;gyroscope"
+                allowFullScreen
+                onLoad={() => setLive(true)}
+                onError={() => setError(true)}
+              />
+            )}
             <div className="absolute bottom-3 left-3 flex items-center gap-2 z-10">
               <span className="bg-red-600 text-white text-xs px-3 py-1 rounded font-bold animate-pulse shadow-lg">
                 {live ? '🔴 AO VIVO' : '⏳ CONECTANDO...'}

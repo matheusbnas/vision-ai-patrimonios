@@ -55,6 +55,21 @@ export default defineConfig(async () => {
           target: 'http://localhost:8000',
           changeOrigin: true,
         },
+        // Proxy da página de vídeo WebRTC (Tixxi) e das chamadas relativas
+        // que o próprio player faz (/auth/refresh, /app/session/*,
+        // /app/whep/*) — ver backend/app/api/video_proxy.py pro porquê.
+        '/video': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
+        '/auth': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
+        '/app': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
       },
     },
   }

@@ -205,3 +205,17 @@ class ApiClient {
 }
 
 export const api = new ApiClient()
+
+// Reescreve uma URL de vídeo da Tixxi (stream_type="html") pra passar pelo
+// NOSSO backend (video_proxy.py) em vez do host direto da Tixxi. A página
+// embutida faz chamadas relativas (/auth/refresh, /app/whep/...) que só
+// funcionam com cookie de sessão se a página em si já estiver na mesma
+// "site" do navegador — por isso trocamos só a origem, mantendo path+query.
+export function toProxiedVideoUrl(originalUrl: string): string {
+  try {
+    const u = new URL(originalUrl)
+    return `${API_BASE}${u.pathname}${u.search}`
+  } catch {
+    return originalUrl
+  }
+}

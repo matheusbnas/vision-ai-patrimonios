@@ -10,7 +10,7 @@ import {
   Target,
   Users,
 } from 'lucide-react'
-import { api } from '../api/client'
+import { api, toProxiedVideoUrl } from '../api/client'
 import type { Patrimonio } from '../types'
 import ZoneCalibrator from '../components/ZoneCalibrator'
 import HlsVideoPlayer from '../components/HlsVideoPlayer'
@@ -653,11 +653,15 @@ export default function MonitoramentoPage() {
                       {/* HLS (protocolo real da conta na Tixxi) quando disponível; cai
                           pro stream_url conforme o stream_type que a própria Tixxi
                           reporta: "raw" é MJPEG puro (multipart/x-mixed-replace) e usa
-                          <img>; "html" é uma página com player e usa <iframe>.
-                          referrerPolicy="no-referrer" é essencial nos dois: o servidor
-                          da câmera rejeita ("Câmera não encontrada") quando vê o Referer
-                          da nossa página — os botões Pop-up/Nova aba só funcionam porque
-                          window.open usa noreferrer e não manda esse header. */}
+                          <img>; "html" é uma página com player WebRTC (WHEP) e usa
+                          <iframe>. Essa página faz chamadas relativas próprias
+                          (/auth/refresh, /app/whep/...) que dependem de cookie de
+                          sessão — embutidas num iframe de origem diferente da nossa,
+                          o navegador bloqueia esse cookie (política de terceiros) e a
+                          negociação WebRTC falha ("Câmera não encontrada"), mesmo com
+                          URL/token válidos. Por isso passamos pelo NOSSO backend
+                          (toProxiedVideoUrl → video_proxy.py), que faz tudo virar
+                          "mesma origem" pro navegador. */}
                       {hlsUrls[code] && !hlsFailed[code] ? (
                         <HlsVideoPlayer
                           key={`hls-${code}`}
@@ -678,7 +682,7 @@ export default function MonitoramentoPage() {
                       ) : (
                         <iframe
                           key={`iframe-${code}-${manualReload[code] || 0}`}
-                          src={streamUrls[code]}
+                          src={streamUrls[code] ? toProxiedVideoUrl(streamUrls[code]) : undefined}
                           referrerPolicy="no-referrer"
                           className="absolute inset-0 w-full h-full border-none"
                           allow="accelerometer;autoplay;encrypted-media;gyroscope"
