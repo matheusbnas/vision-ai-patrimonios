@@ -1,0 +1,101 @@
+COMO A CÂMERA PASSOU A APARECER DENTRO DO SISTEMA
+(sem precisar abrir Pop-up ou Nova aba)
+==================================================
+Data: 23/09/2026
+
+
+O PROBLEMA
+----------
+Algumas câmeras (as que usam a página de vídeo da Tixxi, tipo WebRTC)
+apareciam PRETAS quando embutidas dentro do site (no quadrado de vídeo do
+Monitoramento ou de Patrimônios). Mas se você clicava em "Pop-up" ou "Nova
+aba" e abria a MESMA câmera numa janela separada do navegador, funcionava
+perfeitamente.
+
+Ou seja: a câmera funcionava, o link funcionava, a KEY era válida — só não
+funcionava DENTRO do nosso sistema.
+
+
+PISTAS QUE PARECIAM SER A CAUSA (mas não eram)
+-----------------------------------------------
+Antes de achar o motivo real, testamos e descartamos 3 hipóteses:
+
+1. Token/KEY expirada
+   -> A KEY realmente expira depois de ~1h, mas isso não era o problema
+      deste caso (testamos com uma KEY novinha e continuou preto).
+
+2. O servidor bloqueando pelo "Referer" (de onde veio o pedido)
+   -> Testamos mandar o pedido com e sem essa informação e a resposta foi
+      idêntica nos dois casos. Não era isso.
+
+3. Cookie de sessão bloqueado por o navegador considerar "outro site"
+   -> Essa é bem comum nesse tipo de problema (quando você embute uma
+      página de um site dentro de outro). Fizemos uma correção pra isso
+      (colocar a página pra passar pelo nosso próprio backend), mas o
+      problema AINDA continuava depois dessa mudança.
+
+
+A CAUSA REAL
+------------
+A própria página de vídeo da Tixxi tem um "alarme anti-espião" (feito pra
+impedir que alguém abra o F12 do navegador e fique inspecionando o código
+dela). Esse alarme funciona assim:
+
+  - a cada 1 segundo, ele compara o tamanho da JANELA INTEIRA do navegador
+    com o tamanho da ÁREA DE VÍDEO;
+  - se a diferença for grande, ele assume que alguém abriu o DevTools
+    (F12) pra espiar, e AUTODESTRÓI a conexão: fecha o vídeo e apaga a
+    tela, ficando tudo preto.
+
+O problema: dentro do nosso sistema, a área de vídeo é só um quadradinho
+da tela (bem menor que a janela inteira do navegador) — então essa
+diferença de tamanho é SEMPRE grande, mesmo sem ninguém ter aberto o F12.
+Resultado: o próprio alarme da Tixxi se disparava sozinho, o tempo todo,
+achando (errado) que tinha alguém espionando, e desligava o vídeo antes
+dele nem terminar de carregar.
+
+Por isso funcionava em Pop-up/Nova aba (lá a área de vídeo ocupa a janela
+inteira, então a diferença de tamanho é pequena, e o alarme nunca dispara)
+e não funcionava dentro do quadradinho do nosso sistema.
+
+
+A SOLUÇÃO
+---------
+Como agora essa página passa pelo NOSSO backend antes de chegar no
+navegador (fizemos isso por causa da pista nº 3), aproveitamos essa
+"parada no meio do caminho" pra REMOVER esse pedaço de alarme da página
+antes de entregar ela pro navegador. Ou seja: a câmera continua vindo
+100% da Tixxi, só que sem aquele alarme que atrapalhava o embutimento.
+
+Resumindo os 2 passos da solução:
+
+  1. O backend passou a fazer o papel de "intermediário": em vez do
+     navegador ir direto na Tixxi, ele passa primeiro pelo nosso backend,
+     que busca a página lá e entrega pro navegador.
+
+  2. Nesse meio do caminho, o backend apaga o trechinho de código do
+     "alarme anti-espião" antes de entregar a página.
+
+Com isso, a câmera aparece direto no sistema, sem precisar de Pop-up ou
+Nova aba.
+
+
+ONDE ISSO ESTÁ NO CÓDIGO (pra referência futura)
+-------------------------------------------------
+- backend/app/api/video_proxy.py  -> o "intermediário" e a remoção do
+  alarme anti-espião (é aqui que fica o coração da solução)
+- backend/app/config.py           -> endereço do servidor de vídeo da
+  Tixxi que o intermediário usa
+- frontend/src/api/client.ts      -> função que troca o link direto da
+  Tixxi pelo link que passa pelo nosso backend
+- frontend/src/components/CameraStreamView.tsx -> o player de vídeo usado
+  tanto em Monitoramento quanto em Patrimônios (os dois usam o mesmo
+  agora, pra não ter esse tipo de problema resolvido só de um lado)
+
+
+OBSERVAÇÃO
+----------
+Essa remoção do alarme só acontece na cópia da página que passa pelo NOSSO
+backend (pro nosso próprio sistema, com login/autenticação nossa). O link
+direto da Tixxi (o que abre no Pop-up/Nova aba) continua exatamente igual,
+sem nenhuma alteração.

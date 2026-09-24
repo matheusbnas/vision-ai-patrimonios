@@ -10,10 +10,10 @@ import {
   Target,
   Users,
 } from 'lucide-react'
-import { api, toProxiedVideoUrl } from '../api/client'
+import { api } from '../api/client'
 import type { Patrimonio } from '../types'
 import ZoneCalibrator from '../components/ZoneCalibrator'
-import HlsVideoPlayer from '../components/HlsVideoPlayer'
+import CameraStreamView from '../components/CameraStreamView'
 
 interface DetectionFrame {
   camera_code: string
@@ -152,8 +152,6 @@ export default function MonitoramentoPage() {
   // URL HLS por câmera (protocolo real da conta na Tixxi) — quando disponível,
   // usa o player <video>+hls.js em vez do iframe WebRTC.
   const [hlsUrls, setHlsUrls] = useState<Record<string, string>>({})
-  // Câmeras cujo HLS falhou (erro fatal do hls.js) — caem de volta pro iframe.
-  const [hlsFailed, setHlsFailed] = useState<Record<string, boolean>>({})
   // Tipo do stream_url por câmera, vindo direto da Tixxi: "html" (página com
   // player, precisa de <iframe>) ou "raw" (MJPEG puro, precisa de <img>).
   const [streamTypes, setStreamTypes] = useState<Record<string, string>>({})
@@ -182,6 +180,11 @@ export default function MonitoramentoPage() {
   }>>({})
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const runningRef = useRef(false)
+  // Toca alerta-cor.wav quando uma câmera passa a ter alerta (vandalismo/
+  // furto/objeto de risco) que não tinha no scan anterior — não repete o
+  // som a cada novo scan enquanto o mesmo alerta continuar ativo.
+  const alertAudioRef = useRef<HTMLAudioElement | null>(null)
+  const alertedCodesRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     api.getPatrimonios().then((data) => {
@@ -219,7 +222,6 @@ export default function MonitoramentoPage() {
         }
         setStreamUrls(urls)
         setHlsUrls(hls)
-        setHlsFailed({})
         setCameraNames(names)
         setStreamTypes(types)
       }
@@ -321,7 +323,6 @@ export default function MonitoramentoPage() {
         if (cam.stream_url) setStreamUrls((s) => ({ ...s, [code]: cam.stream_url }))
         if (cam.hls_url) setHlsUrls((h) => ({ ...h, [code]: cam.hls_url }))
         setStreamTypes((t) => ({ ...t, [code]: cam.stream_type || 'html' }))
-        setHlsFailed((f) => ({ ...f, [code]: false }))
       }
     } catch (err) {
       console.error('Erro ao renovar stream_url:', err)
@@ -415,6 +416,22 @@ export default function MonitoramentoPage() {
     }
   }, [])
 
+  // Dispara o som quando alguma câmera ganha um alerta (vandalismo/furto/
+  // objeto de risco) que não tinha no scan anterior.
+  useEffect(() => {
+    const currentAlerted = new Set(
+      Object.entries(frames)
+        .filter(([, f]) => f.alert != null || f.risk_alert != null)
+        .map(([code]) => code)
+    )
+    const hasNewAlert = [...currentAlerted].some((code) => !alertedCodesRef.current.has(code))
+    if (hasNewAlert && alertAudioRef.current) {
+      alertAudioRef.current.currentTime = 0
+      alertAudioRef.current.play().catch(() => {})
+    }
+    alertedCodesRef.current = currentAlerted
+  }, [frames])
+
   const getAlertColor = (level?: string) => {
     switch (level) {
       case 'CRÍTICO': return 'bg-red-600 text-white'
@@ -426,6 +443,7 @@ export default function MonitoramentoPage() {
 
   return (
     <div className="flex gap-4 h-full">
+      <audio ref={alertAudioRef} src="/alerta-cor.wav" preload="auto" />
       {/* Sidebar - Lista de patrimônios */}
       <div className="w-56 flex-shrink-0 space-y-2 overflow-y-auto">
         <div className="flex items-center justify-between px-1">
@@ -650,47 +668,16 @@ export default function MonitoramentoPage() {
 
                     {/* Stream ao vivo + overlay — ocupa a maior parte da tela */}
                     <div className="relative bg-black flex-1" style={{ minHeight: selectedCodes.length > 4 ? '240px' : '420px' }}>
-                      {/* HLS (protocolo real da conta na Tixxi) quando disponível; cai
-                          pro stream_url conforme o stream_type que a própria Tixxi
-                          reporta: "raw" é MJPEG puro (multipart/x-mixed-replace) e usa
-                          <img>; "html" é uma página com player WebRTC (WHEP) e usa
-                          <iframe>. Essa página faz chamadas relativas próprias
-                          (/auth/refresh, /app/whep/...) que dependem de cookie de
-                          sessão — embutidas num iframe de origem diferente da nossa,
-                          o navegador bloqueia esse cookie (política de terceiros) e a
-                          negociação WebRTC falha ("Câmera não encontrada"), mesmo com
-                          URL/token válidos. Por isso passamos pelo NOSSO backend
-                          (toProxiedVideoUrl → video_proxy.py), que faz tudo virar
-                          "mesma origem" pro navegador. */}
-                      {hlsUrls[code] && !hlsFailed[code] ? (
-                        <HlsVideoPlayer
-                          key={`hls-${code}`}
-                          src={hlsUrls[code]}
-                          className="absolute inset-0 w-full h-full"
-                          onError={() => setHlsFailed((s) => ({ ...s, [code]: true }))}
-                        />
-                      ) : streamTypes[code] === 'raw' ? (
-                        <img
-                          key={`mjpeg-${code}-${manualReload[code] || 0}`}
-                          src={streamUrls[code]}
-                          alt={`Stream ao vivo ${code}`}
-                          referrerPolicy="no-referrer"
-                          className="absolute inset-0 w-full h-full object-contain"
-                          onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
-                          onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
-                        />
-                      ) : (
-                        <iframe
-                          key={`iframe-${code}-${manualReload[code] || 0}`}
-                          src={streamUrls[code] ? toProxiedVideoUrl(streamUrls[code]) : undefined}
-                          referrerPolicy="no-referrer"
-                          className="absolute inset-0 w-full h-full border-none"
-                          allow="accelerometer;autoplay;encrypted-media;gyroscope"
-                          allowFullScreen
-                          onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
-                          onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
-                        />
-                      )}
+                      <CameraStreamView
+                        code={code}
+                        streamUrl={streamUrls[code]}
+                        hlsUrl={hlsUrls[code]}
+                        streamType={streamTypes[code]}
+                        reloadToken={manualReload[code] || 0}
+                        className="absolute inset-0 w-full h-full object-contain border-none"
+                        onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
+                        onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
+                      />
                       {/* Overlay com imagem anotada do YOLO (quando disponível) */}
                       {frame?.image_base64 && (
                         <img

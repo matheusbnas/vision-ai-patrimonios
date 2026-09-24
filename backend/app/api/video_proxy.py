@@ -110,6 +110,11 @@ async def proxy_video_page(request: Request):
     )
 
 
+@router.get("/logo.jpg")
+async def proxy_logo(request: Request):
+    return await _proxy(request, f"{VIDEO_PAGE_BASE_URL}/logo.jpg")
+
+
 @router.post("/auth/refresh")
 async def proxy_auth_refresh(request: Request):
     return await _proxy(request, f"{VIDEO_PAGE_BASE_URL}/auth/refresh")

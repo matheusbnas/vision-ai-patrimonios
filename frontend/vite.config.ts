@@ -70,6 +70,10 @@ export default defineConfig(async () => {
           target: 'http://localhost:8000',
           changeOrigin: true,
         },
+        '/logo.jpg': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
       },
     },
   }
