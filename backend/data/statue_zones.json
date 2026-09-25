@@ -1,0 +1,62 @@
+{
+  "000056": {
+    "statue": {
+      "x_start": 0.305,
+      "x_end": 0.45,
+      "y_start": 0.165,
+      "y_end": 0.68
+    },
+    "sensitive": {
+      "x_start": 0.345,
+      "x_end": 0.43,
+      "y_start": 0.16,
+      "y_end": 0.28
+    }
+  },
+  "000194": {
+    "statue": {
+      "x_start": 0.4,
+      "x_end": 0.545,
+      "y_start": 0.255,
+      "y_end": 0.7
+    },
+    "sensitive": {
+      "x_start": 0.4,
+      "x_end": 0.535,
+      "y_start": 0.255,
+      "y_end": 0.46
+    }
+  },
+  "001175": {
+    "statue": {
+      "x_start": 0.26,
+      "x_end": 0.33,
+      "y_start": 0.04,
+      "y_end": 0.21
+    },
+    "sensitive": null
+  },
+  "001962": {
+    "statue": {
+      "x_start": 0.418,
+      "x_end": 0.458,
+      "y_start": 0.435,
+      "y_end": 0.565
+    },
+    "sensitive": null
+  },
+  "001963": {
+    "statue": {
+      "x_start": 0.655,
+      "x_end": 0.78,
+      "y_start": 0.19,
+      "y_end": 0.7
+    },
+    "sensitive": {
+      "x_start": 0.665,
+      "x_end": 0.78,
+      "y_start": 0.19,
+      "y_end": 0.31
+    }
+  }
+}

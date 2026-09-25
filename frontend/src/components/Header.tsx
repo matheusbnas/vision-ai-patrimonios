@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Menu, Wifi, WifiOff, Activity } from 'lucide-react'
 import { api } from '../api/client'
 import type { Page } from '../types'
+import AlertNotifier from './AlertNotifier'
 
 const pageTitles: Record<Page, string> = {
   dashboard: 'Dashboard',
@@ -17,9 +18,10 @@ const pageTitles: Record<Page, string> = {
 interface Props {
   currentPage: Page
   onToggleSidebar: () => void
+  onOpenMonitoramento: () => void
 }
 
-export default function Header({ currentPage, onToggleSidebar }: Props) {
+export default function Header({ currentPage, onToggleSidebar, onOpenMonitoramento }: Props) {
   const [online, setOnline] = useState(false)
   const [modelsStatus, setModelsStatus] = useState<Record<string, boolean>>({})
   const [showModels, setShowModels] = useState(false)
@@ -56,6 +58,9 @@ export default function Header({ currentPage, onToggleSidebar }: Props) {
       </div>
 
       <div className="flex items-center gap-4">
+        {/* Sino de alertas (som + contador; lista ao clicar) */}
+        <AlertNotifier onOpenMonitoramento={onOpenMonitoramento} />
+
         {/* Status dos Modelos */}
         <div className="relative">
           <button

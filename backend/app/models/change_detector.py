@@ -18,20 +18,41 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 
+from app.config import INTERACTION_MEMORY_SECONDS, STATUE_OCCLUSION_SKIP
+from app.models import interaction
 from app.services import zone_service
 
 logger = logging.getLogger(__name__)
 
 
 def _zone_rect_px(frame: np.ndarray, camera_code: Optional[str] = None) -> tuple:
-    """Calcula o retângulo da zona (em pixels do frame original)."""
-    zone = zone_service.get_zone(camera_code)
+    """Retângulo comparado pelo SSIM (em pixels do frame original).
+
+    Com o contorno da estátua calibrado, compara SÓ a estátua — mar, areia,
+    guarda-sóis e gente passando ao redor deixam de contar como "alteração
+    no monumento". Sem contorno, usa a zona (comportamento antigo).
+    """
+    zone = zone_service.get_statue(camera_code)["statue"] or zone_service.get_zone(camera_code)
     h, w = frame.shape[:2]
     x1 = int(w * zone["x_start"])
     x2 = int(w * zone["x_end"])
     y1 = int(h * zone["y_start"])
     y2 = int(h * zone["y_end"])
     return x1, y1, x2, y2
+
+
+def covered_fraction(frame: np.ndarray, camera_code: Optional[str], boxes: Optional[list]) -> float:
+    """Fração (0-1) da área comparada pelo SSIM coberta pelas caixas dadas."""
+    zx1, zy1, zx2, zy2 = _zone_rect_px(frame, camera_code)
+    if not boxes or zx2 <= zx1 or zy2 <= zy1:
+        return 0.0
+    cover = np.zeros((zy2 - zy1, zx2 - zx1), dtype=np.uint8)
+    for (px1, py1, px2, py2) in boxes:
+        ix1, iy1 = max(px1, zx1) - zx1, max(py1, zy1) - zy1
+        ix2, iy2 = min(px2, zx2) - zx1, min(py2, zy2) - zy1
+        if ix2 > ix1 and iy2 > iy1:
+            cover[iy1:iy2, ix1:ix2] = 1
+    return float(cover.mean())
 
 
 def extrair_roi(frame: np.ndarray, camera_code: Optional[str] = None) -> np.ndarray:
@@ -122,6 +143,17 @@ class ChangeDetector:
 
         # Extrai ROI do frame atual e redimensiona para match
         zx1, zy1, zx2, zy2 = _zone_rect_px(current_frame, camera_code)
+
+        # Estátua encoberta por gente/veículo: a comparação desse print não
+        # é confiável (a diferença seria a pessoa, não a estátua) — pula.
+        covered = covered_fraction(current_frame, camera_code, ignore_boxes)
+        if covered >= STATUE_OCCLUSION_SKIP:
+            return {
+                "success": False,
+                "skipped": True,
+                "error": f"Monumento {covered*100:.0f}% encoberto por pessoas/veículos — comparação pulada neste print",
+            }
+
         current_roi = current_frame[zy1:zy2, zx1:zx2]
         crop_h, crop_w = current_roi.shape[:2]
         current_roi = cv2.resize(current_roi, (ref_img.shape[1], ref_img.shape[0]))
@@ -243,6 +275,22 @@ class ChangeDetector:
         alert, final_level = self._combined_alert(
             ssim_alert_level, change_pct, changes, hf_result, hf_alert
         )
+
+        # ─── 5. Mudança logo depois de alguém mexer na estátua ────
+        # Os prints são espaçados — o gesto de arrancar uma peça pode cair
+        # entre dois deles. Mas se houve interação (mão na área sensível /
+        # pessoa em cima) há pouco e agora o contorno mudou, é o cenário de
+        # furto/dano: sobe pra CRÍTICO.
+        last = interaction.last_interaction(camera_code)
+        if alert and last and time.time() - last <= INTERACTION_MEMORY_SECONDS:
+            minutos = max(int((time.time() - last) // 60), 1)
+            final_level = "CRÍTICO"
+            alert = {
+                "level": "CRÍTICO",
+                "message": (f"🚨 CRÍTICO: Estátua alterada ({change_pct:.1f}%) após interação "
+                            f"há ~{minutos} min — possível retirada de peça/dano"),
+                "source": "ssim+interacao",
+            }
 
         # Atualiza estado
         self.monitored[camera_code]["last_check"] = time.time()

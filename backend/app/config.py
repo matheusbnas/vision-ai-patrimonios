@@ -51,7 +51,7 @@ DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
 
 # ─── YOLO ────────────────────────────────────────────────────────
-YOLO_MODEL = os.getenv("YOLO_MODEL", str(BASE_DIR.parent / "yolo11n.pt"))
+YOLO_MODEL = os.getenv("YOLO_MODEL", str(BASE_DIR.parent / "yolo26n.pt"))
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.35"))
 
 # ─── Hugging Face ────────────────────────────────────────────────
@@ -92,13 +92,54 @@ ROI_Y_END = 0.75     # 75% da altura
 # Limitação: o COCO não tem classe pra spray de pichação, martelo,
 # barra de metal etc. — isso exigiria um modelo customizado/
 # open-vocabulary, fora de escopo aqui.
+# guarda-chuva saiu da lista: nas câmeras de orla (Drummond) todo
+# guarda-sol de praia atrás da estátua virava alerta falso.
 RISK_CLASSES = {
     "faca": "ALTO",
     "tesoura": "ALTO",
     "taco_de_beisebol": "MODERADO",
     "garrafa": "MODERADO",
-    "guarda-chuva": "MODERADO",
 }
+
+# ─── Contorno da estátua + interação (pose) ──────────────────────
+# Com o contorno da estátua calibrado (zone_service.get_statue), um
+# objeto de risco só conta se pelo menos esta fração da caixa dele
+# estiver DENTRO do contorno — objeto só "atrás" na imagem (guarda-sol,
+# garrafa na areia) não sobrepõe o suficiente.
+STATUE_OBJECT_OVERLAP = 0.5
+
+# Estátuas de figura humana são detectadas pelo YOLO como "pessoa". Uma
+# detecção de pessoa com IoU >= isto em relação ao contorno calibrado é a
+# PRÓPRIA estátua — sai das regras de pessoa (permanência, interação,
+# área ignorada no SSIM).
+STATUE_SELF_IOU = 0.5
+
+# YOLO26-pose (keypoints: mãos, quadril, pés) — baixado automaticamente
+# pelo ultralytics na primeira execução (~6 MB).
+POSE_MODEL = os.getenv("POSE_MODEL", str(BASE_DIR.parent / "yolo26n-pose.pt"))
+POSE_KEYPOINT_CONF = 0.35
+
+# Pés acima desta fração da altura do contorno (medida a partir da base)
+# = pessoa em cima da estátua/pedestal. Quem está sentado ou em pé ao
+# lado tem os pés no chão, perto da base.
+CLIMB_FOOT_MIN_HEIGHT = 0.2
+
+# Mão na área sensível (cabeça/óculos/violão) detectada em prints
+# seguidos por pelo menos este tempo → sobe de MODERADO para ALTO.
+INTERACTION_ESCALATE_SECONDS = 30
+
+# Mudança física no contorno da estátua até este tempo depois de uma
+# interação → CRÍTICO (possível retirada de peça/dano).
+INTERACTION_MEMORY_SECONDS = 600
+
+# Se pessoas/veículos cobrem esta fração do contorno da estátua, a
+# comparação SSIM desse print é pulada (estátua encoberta, resultado
+# não confiável).
+STATUE_OCCLUSION_SKIP = 0.4
+
+# Notificação na tela: o mesmo tipo de alerta (câmera + origem + nível)
+# não notifica de novo antes deste intervalo. Nível maior notifica na hora.
+NOTIFY_COOLDOWN_SECONDS = int(os.getenv("NOTIFY_COOLDOWN_SECONDS", "300"))
 
 # Tempo (segundos) que um objeto de risco precisa permanecer dentro da
 # zona do monumento para o alerta escalar para CRÍTICO, independente do

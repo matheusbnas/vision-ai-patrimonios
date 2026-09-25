@@ -11,6 +11,13 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
+export interface ZoneRect {
+  x_start: number
+  x_end: number
+  y_start: number
+  y_end: number
+}
+
 class ApiClient {
   private http: AxiosInstance
 
@@ -158,7 +165,38 @@ class ApiClient {
 
   async getZoneFrame(cameraCode: string) {
     const { data } = await this.http.get(`/api/monitor/zone/${cameraCode}/frame`, {
-      timeout: 20000,
+      // Captura pode levar até ~60s (2 tentativas do Playwright)
+      timeout: 90000,
+    })
+    return data
+  }
+
+  // ─── Contorno da estátua + área sensível ──────────────────────
+
+  async getStatue(cameraCode: string) {
+    const { data } = await this.http.get(`/api/monitor/statue/${cameraCode}`)
+    return data
+  }
+
+  async setStatue(cameraCode: string, statue: ZoneRect, sensitive: ZoneRect | null) {
+    const { data } = await this.http.put(`/api/monitor/statue/${cameraCode}`, { statue, sensitive })
+    return data
+  }
+
+  async resetStatue(cameraCode: string) {
+    const { data } = await this.http.delete(`/api/monitor/statue/${cameraCode}`)
+    return data
+  }
+
+  // ─── Alertas (polling incremental por id) ─────────────────────
+
+  async getAlerts(params: { afterId?: number; notify?: boolean; limit?: number } = {}) {
+    const { data } = await this.http.get('/api/alerts', {
+      params: {
+        after_id: params.afterId,
+        notify: params.notify,
+        limit: params.limit ?? 50,
+      },
     })
     return data
   }

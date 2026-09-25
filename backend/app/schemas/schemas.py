@@ -119,3 +119,9 @@ class ZoneInput(BaseModel):
     x_end: float
     y_start: float
     y_end: float
+
+
+class StatueInput(BaseModel):
+    """Contorno da estátua (obrigatório) + área sensível (opcional)."""
+    statue: ZoneInput
+    sensitive: Optional[ZoneInput] = None

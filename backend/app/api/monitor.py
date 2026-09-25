@@ -23,7 +23,7 @@ from app.services.detection_service import DetectionService
 from app.services import zone_service, alert_service
 from app.models.change_detector import ChangeDetector
 from app.config import IMAGES_DIR, TRANSIENT_CLASSES
-from app.schemas.schemas import ZoneInput
+from app.schemas.schemas import ZoneInput, StatueInput
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/monitor", tags=["Monitoramento ao Vivo"])
@@ -463,6 +463,19 @@ def record_loitering_alert(camera_code: str, camera_name: str, loitering_alert: 
         )
 
 
+def record_interaction_alert(camera_code: str, camera_name: str, interaction_alert: Optional[dict]) -> None:
+    """Registra no alert_service um alerta de interação com a estátua (pose), se houver."""
+    if interaction_alert:
+        alert_service.add_alert(
+            camera_code=camera_code,
+            camera_name=camera_name,
+            level=interaction_alert["level"],
+            message=interaction_alert["message"],
+            source="interaction",
+            objects=interaction_alert.get("events"),
+        )
+
+
 def record_ssim_alert(camera_code: str, camera_name: str, alert: Optional[dict]) -> None:
     """Registra no alert_service um alert de mudança física (SSIM), se houver."""
     if alert:
@@ -517,6 +530,7 @@ async def monitor_live(
         "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
         "risk_alert": None,
         "loitering_alert": None,
+        "interaction_alert": None,
         "hf_prediction": None,
         "image_base64": None,
         "frame_captured": False,
@@ -542,9 +556,11 @@ async def monitor_live(
             }
             response["risk_alert"] = result.get("risk_alert")
             response["loitering_alert"] = result.get("loitering_alert")
+            response["interaction_alert"] = result.get("interaction_alert")
             response["hf_prediction"] = result.get("hf_prediction")
             record_risk_alert(camera_code, camera_name, response["risk_alert"])
             record_loitering_alert(camera_code, camera_name, response["loitering_alert"])
+            record_interaction_alert(camera_code, camera_name, response["interaction_alert"])
             response["snapshot_path"] = save_camera_snapshot(frame, camera_code, camera_name, "monitoramento")
             
             # Imagem anotada
@@ -588,6 +604,7 @@ async def monitor_multi(
             "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
             "risk_alert": None,
             "loitering_alert": None,
+            "interaction_alert": None,
             "hf_prediction": None,
             "frame_captured": False,
         }
@@ -621,9 +638,11 @@ async def monitor_multi(
                     }
                     cam_result["risk_alert"] = result.get("risk_alert")
                     cam_result["loitering_alert"] = result.get("loitering_alert")
+                    cam_result["interaction_alert"] = result.get("interaction_alert")
                     cam_result["hf_prediction"] = result.get("hf_prediction")
                     record_risk_alert(code, cam_name, cam_result["risk_alert"])
                     record_loitering_alert(code, cam_name, cam_result["loitering_alert"])
+                    record_interaction_alert(code, cam_name, cam_result["interaction_alert"])
 
                     # Frame anotado — o frontend exibe esse print no lugar do
                     # vídeo ao vivo (modo "Snapshots"), sem abrir conexão
@@ -949,7 +968,7 @@ async def detect_changes(
         yolo_result = detection_service.yolo_detector.detect(current_frame, camera_code=camera_code)
         ignore_boxes = [
             d["bbox"] for d in yolo_result.get("objects", [])
-            if d["class_name"] in TRANSIENT_CLASSES
+            if d["class_name"] in TRANSIENT_CLASSES and not d.get("is_statue")
         ]
     except Exception as e:
         logger.warning(f"Erro YOLO (elementos passageiros) no change detection: {e}")
@@ -1007,6 +1026,34 @@ async def delete_zone(camera_code: str):
     """Remove a calibração custom da câmera, voltando ao quadrante padrão."""
     default = zone_service.reset_zone(camera_code)
     return {"success": True, "camera_code": camera_code, "zone": default}
+
+
+@router.get("/statue/{camera_code}")
+async def get_statue(camera_code: str):
+    """Contorno da estátua + área sensível da câmera (null = não calibrado)."""
+    return {"success": True, "camera_code": camera_code, **zone_service.get_statue(camera_code)}
+
+
+@router.put("/statue/{camera_code}")
+async def set_statue(camera_code: str, payload: StatueInput):
+    try:
+        entry = zone_service.set_statue(
+            camera_code,
+            payload.statue.model_dump(),
+            payload.sensitive.model_dump() if payload.sensitive else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # A referência do SSIM foi recortada pela área antiga — descarta pra
+    # ser recriada com o contorno novo no próximo ciclo.
+    change_detector.monitored.pop(camera_code, None)
+    return {"success": True, "camera_code": camera_code, **entry}
+
+
+@router.delete("/statue/{camera_code}")
+async def reset_statue(camera_code: str):
+    change_detector.monitored.pop(camera_code, None)
+    return {"success": True, "camera_code": camera_code, **zone_service.reset_statue(camera_code)}
 
 
 @router.get("/zone/{camera_code}/frame")

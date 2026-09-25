@@ -42,6 +42,7 @@ class DetectionService:
             "yolo_detection": {"objects": [], "counts": {}, "total_objects": 0},
             "risk_alert": None,
             "loitering_alert": None,
+            "interaction_alert": None,
             "hf_prediction": None,
             "processing_time_ms": 0,
         }
@@ -63,6 +64,7 @@ class DetectionService:
                 }
                 result["risk_alert"] = yolo_result.get("risk_alert")
                 result["loitering_alert"] = yolo_result.get("loitering_alert")
+                result["interaction_alert"] = yolo_result.get("interaction_alert")
             except Exception as e:
                 logger.warning(f"Erro YOLO detection: {e}")
 

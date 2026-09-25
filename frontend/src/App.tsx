@@ -45,6 +45,7 @@ export default function App() {
         <Header
           currentPage={currentPage}
           onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+          onOpenMonitoramento={() => setCurrentPage('monitoramento')}
         />
         <main className="flex-1 overflow-y-auto p-6">
           {renderPage()}

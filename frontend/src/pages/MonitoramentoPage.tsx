@@ -51,7 +51,14 @@ interface DetectionFrame {
     message: string
     objects?: string[]
   }
-  // Alerta preditivo: pessoa parada perto do monumento por muito tempo (permanência suspeita)
+  // Interação com a estátua (pose): mão na área sensível / pessoa em cima
+  interaction_alert?: {
+    level: string
+    message: string
+    events?: string[]
+    dwell_seconds?: number
+  }
+  // Informativo: presença contínua de pessoas junto ao monumento
   loitering_alert?: {
     level: string
     message: string
@@ -196,11 +203,8 @@ export default function MonitoramentoPage() {
   }>>({})
   const intervalRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const runningRef = useRef(false)
-  // Toca alerta-cor.wav quando uma câmera passa a ter alerta (vandalismo/
-  // furto/objeto de risco) que não tinha no scan anterior — não repete o
-  // som a cada novo scan enquanto o mesmo alerta continuar ativo.
-  const alertAudioRef = useRef<HTMLAudioElement | null>(null)
-  const alertedCodesRef = useRef<Set<string>>(new Set())
+  // Som + mensagem de alerta ficam no AlertNotifier (global, App.tsx),
+  // que só notifica o que o backend marca como relevante.
 
   useEffect(() => {
     api.getPatrimonios().then((data) => {
@@ -446,22 +450,6 @@ export default function MonitoramentoPage() {
     }
   }, [])
 
-  // Dispara o som quando alguma câmera ganha um alerta (vandalismo/furto/
-  // objeto de risco) que não tinha no scan anterior.
-  useEffect(() => {
-    const currentAlerted = new Set(
-      Object.entries(frames)
-        .filter(([, f]) => f.alert != null || f.risk_alert != null)
-        .map(([code]) => code)
-    )
-    const hasNewAlert = [...currentAlerted].some((code) => !alertedCodesRef.current.has(code))
-    if (hasNewAlert && alertAudioRef.current) {
-      alertAudioRef.current.currentTime = 0
-      alertAudioRef.current.play().catch(() => {})
-    }
-    alertedCodesRef.current = currentAlerted
-  }, [frames])
-
   const getAlertColor = (level?: string) => {
     switch (level) {
       case 'CRÍTICO': return 'bg-red-600 text-white'
@@ -473,7 +461,6 @@ export default function MonitoramentoPage() {
 
   return (
     <div className="flex gap-4 h-full">
-      <audio ref={alertAudioRef} src="/alerta-cor.wav" preload="auto" />
       {/* Sidebar - Lista de patrimônios */}
       <div className="w-56 flex-shrink-0 space-y-2 overflow-y-auto">
         <div className="flex items-center justify-between px-1">
@@ -663,7 +650,8 @@ export default function MonitoramentoPage() {
             }`}>
               {selectedCodes.map((code) => {
                 const frame = frames[code]
-                const hasAlert = frame?.alert != null || frame?.risk_alert != null || frame?.loitering_alert != null
+                // Presença contínua (loitering) é só informativa — não pinta o cabeçalho
+                const hasAlert = frame?.alert != null || frame?.risk_alert != null || frame?.interaction_alert != null
 
                 return (
                   <div key={code} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col">
@@ -783,8 +771,14 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
-                      {/* Badge de alerta preditivo (YOLO — objeto de risco no quadrante) */}
-                      {frame?.risk_alert ? (
+                      {/* Badge: interação com a estátua > objeto de risco > mudança física */}
+                      {frame?.interaction_alert ? (
+                        <div className="absolute top-2 left-2 z-10">
+                          <span className="text-[10px] px-2 py-0.5 rounded font-bold shadow-lg bg-red-600 text-white animate-pulse">
+                            ✋ INTERAÇÃO COM A ESTÁTUA
+                          </span>
+                        </div>
+                      ) : frame?.risk_alert ? (
                         <div className="absolute top-2 left-2 z-10">
                           <span className="text-[10px] px-2 py-0.5 rounded font-bold shadow-lg bg-red-600 text-white animate-pulse">
                             🔪 PREDITIVO: {frame.risk_alert.objects?.join('/').toUpperCase()}
@@ -848,9 +842,21 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
-                      {/* Alerta preditivo (permanência suspeita de pessoa na zona) */}
+                      {/* Interação com a estátua (pose) */}
+                      {frame?.interaction_alert && (
+                        <div className={`rounded-lg p-2 flex items-center gap-2 animate-pulse ${
+                          frame.interaction_alert.level === 'MODERADO'
+                            ? 'bg-yellow-100 text-yellow-900'
+                            : 'bg-red-100 text-red-800'
+                        }`}>
+                          <AlertTriangle size={16} className="shrink-0" />
+                          <p className="font-bold text-[10px]">{frame.interaction_alert.message}</p>
+                        </div>
+                      )}
+
+                      {/* Informativo: presença contínua de pessoas junto ao monumento */}
                       {frame?.loitering_alert && (
-                        <div className="rounded-lg p-2 flex items-center gap-2 bg-orange-100 text-orange-800 animate-pulse">
+                        <div className="rounded-lg p-2 flex items-center gap-2 bg-gray-100 text-gray-700">
                           <Users size={16} className="shrink-0" />
                           <div>
                             <p className="font-bold text-[10px]">{frame.loitering_alert.message}</p>

@@ -7,6 +7,13 @@ o SSIM (change_detector) e o filtro de risco do YOLO (detector) à
 área onde o monumento realmente aparece naquele enquadramento.
 
 Câmeras sem calibração custom caem no retângulo padrão (ROI_* do config.py).
+
+Além da zona, cada câmera pode ter (data/statue_zones.json):
+  - "statue": contorno JUSTO da estátua (incluindo base/pedestal) — usado
+    pra exigir que objetos de risco encostem na estátua, pra análise de
+    pose (mão na estátua, pessoa em cima) e como ROI do SSIM;
+  - "sensitive": sub-área que costuma ser alvo de furto (óculos/cabeça do
+    Drummond, violão do Tom Jobim...) — mão ali vira alerta de interação.
 """
 
 import json
@@ -25,6 +32,7 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 ZONES_FILE = DATA_DIR / "camera_zones.json"
+STATUE_FILE = DATA_DIR / "statue_zones.json"
 _lock = threading.Lock()
 
 
@@ -37,19 +45,19 @@ def _default_zone() -> dict:
     }
 
 
-def _load() -> dict:
-    if not ZONES_FILE.exists():
+def _load(path=ZONES_FILE) -> dict:
+    if not path.exists():
         return {}
     try:
-        with open(ZONES_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        logger.warning(f"Erro ao ler {ZONES_FILE}: {e}")
+        logger.warning(f"Erro ao ler {path}: {e}")
         return {}
 
 
-def _save(data: dict) -> None:
-    with open(ZONES_FILE, "w", encoding="utf-8") as f:
+def _save(data: dict, path=ZONES_FILE) -> None:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -65,8 +73,7 @@ def is_custom(camera_code: str) -> bool:
     return camera_code in _load()
 
 
-def set_zone(camera_code: str, zone: dict) -> dict:
-    """Valida e salva a zona calibrada de uma câmera."""
+def _normalize(zone: dict) -> dict:
     x_start, x_end = zone["x_start"], zone["x_end"]
     y_start, y_end = zone["y_start"], zone["y_end"]
 
@@ -75,12 +82,17 @@ def set_zone(camera_code: str, zone: dict) -> dict:
     if not (0 <= y_start < y_end <= 1):
         raise ValueError("y_start/y_end inválidos (esperado 0 <= y_start < y_end <= 1)")
 
-    normalized = {
+    return {
         "x_start": round(x_start, 4),
         "x_end": round(x_end, 4),
         "y_start": round(y_start, 4),
         "y_end": round(y_end, 4),
     }
+
+
+def set_zone(camera_code: str, zone: dict) -> dict:
+    """Valida e salva a zona calibrada de uma câmera."""
+    normalized = _normalize(zone)
 
     with _lock:
         zones = _load()
@@ -99,3 +111,31 @@ def reset_zone(camera_code: str) -> dict:
             del zones[camera_code]
             _save(zones)
     return _default_zone()
+
+
+# ─── Contorno da estátua + área sensível ─────────────────────────
+
+def get_statue(camera_code: Optional[str]) -> dict:
+    """{"statue": zona|None, "sensitive": zona|None} — None = não calibrado."""
+    entry = _load(STATUE_FILE).get(camera_code or "", {})
+    return {"statue": entry.get("statue"), "sensitive": entry.get("sensitive")}
+
+
+def set_statue(camera_code: str, statue: dict, sensitive: Optional[dict] = None) -> dict:
+    """Salva o contorno da estátua (obrigatório) e a área sensível (opcional)."""
+    entry = {"statue": _normalize(statue), "sensitive": _normalize(sensitive) if sensitive else None}
+    with _lock:
+        data = _load(STATUE_FILE)
+        data[camera_code] = entry
+        _save(data, STATUE_FILE)
+    logger.info(f"Contorno da estátua calibrado para câmera {camera_code}: {entry}")
+    return entry
+
+
+def reset_statue(camera_code: str) -> dict:
+    with _lock:
+        data = _load(STATUE_FILE)
+        if camera_code in data:
+            del data[camera_code]
+            _save(data, STATUE_FILE)
+    return {"statue": None, "sensitive": None}

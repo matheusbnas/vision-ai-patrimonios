@@ -25,8 +25,10 @@ from app.config import (
     RISK_CLASSES,
     DWELL_ALERT_SECONDS,
     PERSON_LOITERING_ALERT_SECONDS,
+    STATUE_OBJECT_OVERLAP,
 )
 from app.services import zone_service, risk_tracker
+from app.models.interaction import InteractionAnalyzer, _overlap_frac, is_statue_itself
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,14 @@ def _zone_box(width: int, height: int, camera_code: Optional[str] = None) -> tup
     y1 = int(height * zone["y_start"])
     y2 = int(height * zone["y_end"])
     return x1, y1, x2, y2
+
+
+def _frac_box(frac: Optional[dict], width: int, height: int) -> Optional[tuple]:
+    """Zona em frações (0-1) → retângulo em pixels; None se não calibrada."""
+    if not frac:
+        return None
+    return (int(width * frac["x_start"]), int(height * frac["y_start"]),
+            int(width * frac["x_end"]), int(height * frac["y_end"]))
 
 
 def _center_in_zone(bbox: list, zone: tuple) -> bool:
@@ -62,6 +72,7 @@ class PatrimonyDetector:
     def __init__(self):
         self.model = None
         self.model_loaded = False
+        self.interaction = InteractionAnalyzer()
 
     def load_model(self) -> bool:
         """Carrega o modelo YOLO"""
@@ -110,6 +121,7 @@ class PatrimonyDetector:
                 "risk_objects": [],
                 "risk_alert": None,
                 "loitering_alert": None,
+                "interaction_alert": None,
                 "processing_time_ms": 0,
             }
 
@@ -120,6 +132,9 @@ class PatrimonyDetector:
         class_counts = Counter()
         h, w = image.shape[:2]
         zone = _zone_box(w, h, camera_code)
+        statue_cfg = zone_service.get_statue(camera_code)
+        statue_px = _frac_box(statue_cfg["statue"], w, h)
+        sensitive_px = _frac_box(statue_cfg["sensitive"], w, h)
 
         if results and len(results) > 0:
             result = results[0]
@@ -142,6 +157,11 @@ class PatrimonyDetector:
                         "confidence": round(score, 3),
                         "bbox": bbox,
                         "in_zone": _center_in_zone(bbox, zone),
+                        # Fração da caixa do objeto dentro do contorno da
+                        # estátua (None = câmera sem contorno calibrado)
+                        "statue_overlap": round(_overlap_frac(bbox, statue_px), 3) if statue_px else None,
+                        # A própria estátua detectada como "pessoa"
+                        "is_statue": class_name == "pessoa" and is_statue_itself(bbox, statue_px),
                     }
                     detections.append(detection)
                     class_counts[class_name] += 1
@@ -152,10 +172,19 @@ class PatrimonyDetector:
         else:
             annotated_image = image.copy()
 
-        # ─── Filtro de risco: objetos de RISK_CLASSES dentro do quadrante ───
+        # ─── Filtro de risco: objetos de RISK_CLASSES junto da estátua ───
+        # Com contorno calibrado, o objeto precisa ENCOSTAR na estátua
+        # (STATUE_OBJECT_OVERLAP da caixa dentro do contorno) — estar só
+        # "atrás" dela na imagem, como um guarda-sol na areia, não conta.
+        # Sem contorno, cai no critério antigo (centro dentro da zona).
+        def _near_statue(d: dict) -> bool:
+            if statue_px:
+                return d["statue_overlap"] >= STATUE_OBJECT_OVERLAP
+            return d["in_zone"]
+
         risk_objects = [
             d for d in detections
-            if d["class_name"] in RISK_CLASSES and d["in_zone"]
+            if d["class_name"] in RISK_CLASSES and _near_statue(d)
         ]
         risk_alert = None
         tracker_key = camera_code or "unknown"
@@ -193,8 +222,12 @@ class PatrimonyDetector:
         # que o dano aconteça. Usa o mesmo mecanismo de dwell do
         # risk_tracker, mas num namespace separado pra não interferir no
         # timer de RISK_CLASSES.
+        # Com contorno calibrado, "perto" = encostada na estátua; sem ele,
+        # qualquer pessoa na zona (critério antigo).
         person_present = any(
-            d["class_name"] == "pessoa" and d["in_zone"] for d in detections
+            d["class_name"] == "pessoa" and not d["is_statue"]
+            and ((d["statue_overlap"] or 0) >= 0.1 if statue_px else d["in_zone"])
+            for d in detections
         )
         loitering_key = f"{tracker_key}::pessoa"
         person_dwell = risk_tracker.update(
@@ -202,21 +235,43 @@ class PatrimonyDetector:
         )
         person_dwell_seconds = person_dwell.get("pessoa", 0.0)
 
+        # Informativo (MODERADO, não gera notificação — ver alert_service):
+        # em monumento turístico sempre tem alguém por perto, e o YOLO não
+        # reidentifica pessoas, então "10 min" costuma ser gente diferente.
         loitering_alert = None
         if person_present and person_dwell_seconds >= PERSON_LOITERING_ALERT_SECONDS:
             minutos = int(person_dwell_seconds // 60)
             loitering_alert = {
-                "level": "ALTO",
+                "level": "MODERADO",
                 "message": (
-                    f"⚠️ ALTO: Pessoa parada perto do monumento há {minutos} min "
-                    f"— risco preventivo de furto/vandalismo"
+                    f"👥 Presença contínua de pessoas junto ao monumento há {minutos} min"
                 ),
                 "dwell_seconds": round(person_dwell_seconds, 1),
             }
 
-        # ─── Desenha o quadrante e destaca objetos de risco ──────────────
+        # ─── Interação com a estátua (pose) ──────────────────────────────
+        # Só roda o modelo de pose quando há alguém encostado na estátua.
+        interaction_alert = None
+        if statue_px:
+            someone_at_statue = any(
+                d["class_name"] == "pessoa" and not d["is_statue"]
+                and (d["statue_overlap"] or 0) >= 0.1
+                for d in detections
+            )
+            if someone_at_statue:
+                interaction_alert = self.interaction.analyze(
+                    image, tracker_key, statue_px, sensitive_px, annotated=annotated_image
+                )
+            else:
+                risk_tracker.update(f"{tracker_key}::interacao", set())
+
+        # ─── Desenha zona, contorno da estátua e objetos de risco ────────
         zx1, zy1, zx2, zy2 = zone
-        cv2.rectangle(annotated_image, (zx1, zy1), (zx2, zy2), (0, 255, 255), 2)
+        cv2.rectangle(annotated_image, (zx1, zy1), (zx2, zy2), (0, 255, 255), 1)
+        if statue_px:
+            cv2.rectangle(annotated_image, statue_px[:2], statue_px[2:], (0, 200, 255), 2)
+        if sensitive_px:
+            cv2.rectangle(annotated_image, sensitive_px[:2], sensitive_px[2:], (255, 0, 255), 2)
         for d in risk_objects:
             rx1, ry1, rx2, ry2 = d["bbox"]
             cv2.rectangle(annotated_image, (rx1, ry1), (rx2, ry2), (255, 0, 0), 3)
@@ -233,6 +288,7 @@ class PatrimonyDetector:
             "risk_objects": risk_objects,
             "risk_alert": risk_alert,
             "loitering_alert": loitering_alert,
+            "interaction_alert": interaction_alert,
             "processing_time_ms": round(elapsed, 2),
         }
 

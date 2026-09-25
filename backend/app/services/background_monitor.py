@@ -14,11 +14,13 @@ import logging
 import time
 
 from app.config import (
+    TRANSIENT_CLASSES,
     PATRIMONIOS,
     BACKGROUND_MONITOR_ENABLED,
     BACKGROUND_MONITOR_INTERVAL_SECONDS,
 )
 from app.api import monitor as monitor_api
+from app.models.change_detector import covered_fraction
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +67,26 @@ def _process_camera(code: str) -> None:
     monitor_api.save_camera_snapshot(frame, code, camera_name, "monitoramento")
 
     result = detection_service.detect_full(frame, camera_id=code)
-    risk_alert = result.get("risk_alert")
-    monitor_api.record_risk_alert(code, camera_name, risk_alert)
+    monitor_api.record_risk_alert(code, camera_name, result.get("risk_alert"))
+    monitor_api.record_interaction_alert(code, camera_name, result.get("interaction_alert"))
+
+    # Pessoas/veículos no quadro — excluídos do diff SSIM (senão alguém
+    # sentado ao lado da estátua vira "X% do monumento alterado").
+    transient_boxes = [
+        d["bbox"] for d in result.get("yolo_detection", {}).get("objects", [])
+        if d["class_name"] in TRANSIENT_CLASSES and not d.get("is_statue")
+    ]
 
     # Garante que toda câmera tenha uma referência SSIM — sem isso, mudança
     # física (pichação, dano, peça removida) nunca gera alerta pra essa câmera.
+    # Só cria com a estátua livre: uma referência com turista na frente
+    # faria todo print seguinte parecer "alterado".
     if code not in change_detector.monitored:
-        change_detector.set_reference(code, frame, detection_service)
-        logger.info(f"[background_monitor] Referência SSIM criada automaticamente para câmera {code}")
+        if covered_fraction(frame, code, transient_boxes) < 0.05:
+            change_detector.set_reference(code, frame, detection_service)
+            logger.info(f"[background_monitor] Referência SSIM criada automaticamente para câmera {code}")
     else:
-        change_result = change_detector.check(code, frame, detection_service)
+        change_result = change_detector.check(code, frame, detection_service, ignore_boxes=transient_boxes)
         if change_result.get("success"):
             monitor_api.record_ssim_alert(code, camera_name, change_result.get("alert"))
 
