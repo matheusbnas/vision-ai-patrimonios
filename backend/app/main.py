@@ -128,7 +128,7 @@ if ASSETS_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
 # ─── Injeção de Dependências nas Rotas ──────────────────────────
-from app.api import auth, cameras, vandalism, dashboard, monitor, alerts, video_proxy
+from app.api import auth, cameras, vandalism, dashboard, monitor, alerts, video_proxy, webhooks
 
 auth.init_routes(camera_service)
 cameras.init_routes(camera_service)
@@ -143,6 +143,7 @@ app.include_router(dashboard.router)
 app.include_router(monitor.router)
 app.include_router(alerts.router)
 app.include_router(video_proxy.router)
+app.include_router(webhooks.router)
 
 
 # ─── Health Check ───────────────────────────────────────────────

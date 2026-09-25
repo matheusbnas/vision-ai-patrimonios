@@ -36,6 +36,10 @@ STREAM_KEY = os.getenv("STREAM_KEY", "")
 # Usado pelo proxy em app/api/video_proxy.py — ver comentário lá do porquê.
 VIDEO_PAGE_BASE_URL = os.getenv("VIDEO_PAGE_BASE_URL", "http://10.50.3.11:5001")
 
+# ─── Webhook OctaVision ──────────────────────────────────────────
+# Token exigido em ?token=... no endpoint /api/webhooks/octavision.
+OCTAVISION_WEBHOOK_TOKEN = os.getenv("OCTAVISION_WEBHOOK_TOKEN", "")
+
 # ─── Servidor FastAPI ────────────────────────────────────────────
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))

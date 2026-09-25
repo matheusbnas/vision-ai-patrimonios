@@ -107,7 +107,7 @@ class ApiClient {
   // isolado do pipeline de IA.
   async captureSnapshot(code: string) {
     const { data } = await this.http.post(`/api/monitor/snapshot/${code}`, null, {
-      timeout: 30000,
+      timeout: 90000,
     })
     return data
   }
@@ -126,7 +126,7 @@ class ApiClient {
   async detectChanges(cameraCode: string, usarDemo = true) {
     const { data } = await this.http.get(`/api/monitor/change/${cameraCode}`, {
       params: { usar_demo: usarDemo },
-      timeout: 30000,
+      timeout: 90000,
     })
     return data
   }
@@ -134,7 +134,7 @@ class ApiClient {
   async setReference(cameraCode: string, usarDemo = true) {
     const { data } = await this.http.post(`/api/monitor/change/${cameraCode}/reference`, null, {
       params: { usar_demo: usarDemo },
-      timeout: 15000,
+      timeout: 90000,
     })
     return data
   }

@@ -56,7 +56,7 @@ def _process_camera(code: str) -> None:
         logger.debug(f"[background_monitor] Sem stream_url pra câmera {code}, pulando")
         return
 
-    frame = monitor_api.capture_frame(stream_url, 15.0, camera_code=code)
+    frame = monitor_api.get_frame(stream_url, code, 15.0)
     _camera_status[code] = {"has_video": frame is not None, "checked_at": time.time()}
     if frame is None:
         logger.debug(f"[background_monitor] Falha ao capturar frame da câmera {code}")

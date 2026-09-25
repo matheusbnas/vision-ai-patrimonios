@@ -22,6 +22,8 @@ interface DetectionFrame {
   image_base64?: string
   snapshot_path?: string
   frame_captured?: boolean
+  // true quando a última captura falhou e image_base64 é do scan anterior
+  stale?: boolean
   processing_time_ms: number
   timestamp: number
   yolo_detection?: {
@@ -171,6 +173,20 @@ export default function MonitoramentoPage() {
   // "🔄 Recarregar" (ver reloadCamera), que também busca uma stream_url
   // nova antes de recarregar, cobrindo o caso da KEY ter expirado (~1h).
   const [manualReload, setManualReload] = useState<Record<string, number>>({})
+  // "snapshot": mostra o último print analisado pela IA (YOLO + vandalismo),
+  // capturado pelo backend a cada ciclo — o navegador não mantém conexão
+  // aberta com a câmera, então não há player caindo/ficando preto.
+  // "live": player ao vivo embutido (HLS/iframe), como antes.
+  const [viewMode, setViewMode] = useState<'snapshot' | 'live'>(() => {
+    try {
+      return localStorage.getItem('monitoramento.viewMode') === 'live' ? 'live' : 'snapshot'
+    } catch {
+      return 'snapshot'
+    }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('monitoramento.viewMode', viewMode) } catch {}
+  }, [viewMode])
   // Resultado do "print" puro por câmera (sem YOLO/HF) — só pra checar
   // rapidamente se a câmera está entregando vídeo, isolado da IA.
   const [snapshots, setSnapshots] = useState<Record<string, {
@@ -338,13 +354,19 @@ export default function MonitoramentoPage() {
     try {
       const data = await api.monitorMulti(selectedCodes, 0.35)
       if (data.success) {
-        const newFrames: Record<string, DetectionFrame> = {}
-        for (const cam of data.cameras) {
-          if (cam.success) {
-            newFrames[cam.camera_code] = cam
+        setFrames((prev) => {
+          const newFrames: Record<string, DetectionFrame> = {}
+          for (const cam of data.cameras) {
+            if (!cam.success) continue
+            const old = prev[cam.camera_code]
+            // Captura falhou neste ciclo: mantém o último print na tela
+            // (marcado como desatualizado) em vez de deixar o quadro vazio.
+            newFrames[cam.camera_code] = !cam.frame_captured && old?.image_base64
+              ? { ...cam, image_base64: old.image_base64, timestamp: old.timestamp, stale: true }
+              : cam
           }
-        }
-        setFrames(newFrames)
+          return newFrames
+        })
       }
     } catch (err) {
       console.error('Erro no monitoramento:', err)
@@ -523,6 +545,28 @@ export default function MonitoramentoPage() {
               Escanear agora
             </button>
           )}
+
+          {/* Modo de exibição dos quadros */}
+          <div className="flex rounded-lg bg-gray-100 p-0.5 text-xs font-medium">
+            <button
+              onClick={() => setViewMode('snapshot')}
+              className={`flex-1 py-1.5 rounded-md transition-all ${
+                viewMode === 'snapshot' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+              title="Mostra o último print analisado pela IA — sem conexão contínua com a câmera"
+            >
+              📷 Prints (IA)
+            </button>
+            <button
+              onClick={() => setViewMode('live')}
+              className={`flex-1 py-1.5 rounded-md transition-all ${
+                viewMode === 'live' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+              }`}
+              title="Player de vídeo ao vivo embutido"
+            >
+              🎥 Ao vivo
+            </button>
+          </div>
         </div>
 
         {/* ─── Referência vs Comparação ──────────────────── */}
@@ -625,6 +669,7 @@ export default function MonitoramentoPage() {
                         <span className="opacity-60">cód. {code}</span>
                       </div>
                       <div className="flex items-center gap-2">
+                        {viewMode === 'live' && (
                         <button
                           onClick={() => reloadCamera(code)}
                           disabled={!streamUrls[code]}
@@ -633,6 +678,7 @@ export default function MonitoramentoPage() {
                         >
                           🔄 Recarregar
                         </button>
+                        )}
                         <button
                           onClick={() => openPopup(code)}
                           disabled={!streamUrls[code]}
@@ -668,26 +714,59 @@ export default function MonitoramentoPage() {
 
                     {/* Stream ao vivo + overlay — ocupa a maior parte da tela */}
                     <div className="relative bg-black flex-1" style={{ minHeight: selectedCodes.length > 4 ? '240px' : '420px' }}>
-                      <CameraStreamView
-                        code={code}
-                        streamUrl={streamUrls[code]}
-                        hlsUrl={hlsUrls[code]}
-                        streamType={streamTypes[code]}
-                        reloadToken={manualReload[code] || 0}
-                        className="absolute inset-0 w-full h-full object-contain border-none"
-                        onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
-                        onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
-                      />
-                      {/* Overlay com imagem anotada do YOLO (quando disponível) */}
-                      {frame?.image_base64 && (
-                        <img
-                          src={`data:image/jpeg;base64,${frame.image_base64}`}
-                          alt={`Detecção ${code}`}
-                          className="absolute inset-0 w-full h-full object-cover opacity-60 pointer-events-none"
-                        />
+                      {viewMode === 'snapshot' ? (
+                        frame?.image_base64 ? (
+                          <img
+                            src={`data:image/jpeg;base64,${frame.image_base64}`}
+                            alt={`Print analisado ${code}`}
+                            className={`absolute inset-0 w-full h-full object-contain ${frame.stale ? 'opacity-50' : ''}`}
+                          />
+                        ) : (
+                          <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
+                            <div className="text-center">
+                              {loading ? (
+                                <>
+                                  <RefreshCw size={28} className="mx-auto mb-2 animate-spin" />
+                                  <p>Capturando print...</p>
+                                </>
+                              ) : frame && !frame.frame_captured ? (
+                                <>
+                                  <WifiOff size={28} className="mx-auto mb-2" />
+                                  <p>Não foi possível capturar a câmera</p>
+                                </>
+                              ) : (
+                                <>
+                                  <Camera size={28} className="mx-auto mb-2" />
+                                  <p>Clique em "Iniciar Monitoramento" para capturar</p>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      ) : (
+                        <>
+                          <CameraStreamView
+                            code={code}
+                            streamUrl={streamUrls[code]}
+                            hlsUrl={hlsUrls[code]}
+                            streamType={streamTypes[code]}
+                            reloadToken={manualReload[code] || 0}
+                            className="absolute inset-0 w-full h-full object-contain border-none"
+                            onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
+                            onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
+                          />
+                          {/* Overlay com imagem anotada do YOLO (quando disponível) */}
+                          {frame?.image_base64 && (
+                            <img
+                              src={`data:image/jpeg;base64,${frame.image_base64}`}
+                              alt={`Detecção ${code}`}
+                              className="absolute inset-0 w-full h-full object-cover opacity-60 pointer-events-none"
+                            />
+                          )}
+                        </>
                       )}
                       {/* Fallback se iframe falhar */}
-                      {streamErrors[code] && (
+                      {viewMode === 'live' && streamErrors[code] && (
                         <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm bg-gray-900/90">
                           <div className="text-center">
                             <WifiOff size={28} className="mx-auto mb-2" />
@@ -715,11 +794,20 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
-                      {/* Badge AO VIVO */}
+                      {/* Badge AO VIVO / horário do print */}
                       <div className="absolute top-2 right-2 z-10">
-                        <span className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold animate-pulse shadow-lg">
-                          🔴 AO VIVO
-                        </span>
+                        {viewMode === 'live' ? (
+                          <span className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold animate-pulse shadow-lg">
+                            🔴 AO VIVO
+                          </span>
+                        ) : frame?.image_base64 && (
+                          <span className={`text-white text-[10px] px-2 py-0.5 rounded font-bold shadow-lg ${
+                            frame.stale ? 'bg-gray-600' : 'bg-gray-900/80'
+                          }`}>
+                            📷 {new Date(frame.timestamp * 1000).toLocaleTimeString('pt-BR')}
+                            {frame.stale && ' · desatualizado'}
+                          </span>
+                        )}
                       </div>
                     </div>
 

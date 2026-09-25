@@ -5,6 +5,7 @@ Captura frames do stream Tixxi, processa com YOLO + HF e retorna análise.
 
 import base64
 import logging
+import threading
 import time
 from datetime import datetime
 from io import BytesIO
@@ -14,6 +15,7 @@ from typing import Optional
 import cv2
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app.services.camera_service import CameraService
@@ -344,6 +346,40 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0,
     return None
 
 
+# ─── Captura compartilhada (cache + lock por câmera) ─────────────
+# Uma captura via Playwright leva de 5 a 60s e abre uma sessão WebRTC nova
+# na Tixxi. Sem coordenação, o loop do frontend (/multi), a comparação
+# (/change) e o background_monitor capturavam a MESMA câmera em paralelo —
+# sessões simultâneas derrubam umas às outras (tela de "Reconectando") e
+# cada ciclo pagava a captura 2-3x. Com o lock, quem chega enquanto uma
+# captura está em andamento espera e reaproveita o frame recém-capturado.
+FRAME_CACHE_SECONDS = 15.0
+
+_frame_cache: dict[str, tuple[float, np.ndarray]] = {}
+_frame_locks: dict[str, threading.Lock] = {}
+_frame_locks_guard = threading.Lock()
+
+
+def get_frame(stream_url: str, camera_code: str, timeout_sec: float = 15.0,
+              max_age: float = FRAME_CACHE_SECONDS) -> Optional[np.ndarray]:
+    """capture_frame com cache curto e no máximo uma captura por câmera por vez.
+
+    Bloqueante — em rotas async, chamar via run_in_threadpool.
+    max_age=0 força captura nova (ex.: print manual).
+    """
+    with _frame_locks_guard:
+        lock = _frame_locks.setdefault(camera_code, threading.Lock())
+    with lock:
+        cached = _frame_cache.get(camera_code)
+        if cached and time.time() - cached[0] <= max_age:
+            return cached[1].copy()
+        frame = capture_frame(stream_url, timeout_sec, camera_code=camera_code)
+        if frame is not None:
+            _frame_cache[camera_code] = (time.time(), frame)
+            return frame.copy()
+        return None
+
+
 # Labels de captura automática/repetitiva — sobrescrevem sempre o mesmo
 # arquivo (1 por câmera+label) em vez de acumular um arquivo novo a cada
 # captura. "print" (snapshot manual, botão explícito) fica de fora e
@@ -489,10 +525,7 @@ async def monitor_live(
     # 3. Tenta capturar frame (timeout curto — 3s)
     if stream_url:
         try:
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
-                frame = future.result(timeout=20)
+            frame = await run_in_threadpool(get_frame, stream_url, camera_code)
         except Exception:
             frame = None
         
@@ -532,6 +565,7 @@ async def monitor_live(
 async def monitor_multi(
     codes: str = Query(..., description="Códigos das câmeras separados por vírgula"),
     confidence: Optional[float] = Query(None),
+    include_image: bool = Query(True, description="Inclui o frame anotado (YOLO) em base64"),
 ):
     """
     Monitora múltiplas câmeras em quadrante.
@@ -569,10 +603,7 @@ async def monitor_multi(
             
             if stream_url:
                 try:
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
-                        future = pool.submit(capture_frame, stream_url, 15.0, code)
-                        frame = future.result(timeout=20)
+                    frame = await run_in_threadpool(get_frame, stream_url, code)
                 except Exception:
                     frame = None
                 
@@ -593,6 +624,17 @@ async def monitor_multi(
                     cam_result["hf_prediction"] = result.get("hf_prediction")
                     record_risk_alert(code, cam_name, cam_result["risk_alert"])
                     record_loitering_alert(code, cam_name, cam_result["loitering_alert"])
+
+                    # Frame anotado — o frontend exibe esse print no lugar do
+                    # vídeo ao vivo (modo "Snapshots"), sem abrir conexão
+                    # contínua com a câmera no navegador.
+                    if include_image:
+                        annotated = result.get("yolo_detection", {}).get("annotated_image", frame)
+                        if annotated is not None:
+                            _, buffer = cv2.imencode(".jpg", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR),
+                                                     [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            cam_result["image_base64"] = base64.b64encode(buffer).decode("utf-8")
+                    cam_result["timestamp"] = time.time()
             
             cam_result["success"] = True
             
@@ -754,7 +796,7 @@ async def capture_snapshot(
         raise HTTPException(status_code=400, detail="Câmera não possui stream URL")
     
     # Captura frame real (sem fallback sintético)
-    frame = capture_frame(stream_url, timeout_sec=20.0, camera_code=camera_code)
+    frame = await run_in_threadpool(get_frame, stream_url, camera_code, 20.0, 0)
     
     if frame is None:
         return {
@@ -815,10 +857,7 @@ async def set_reference(
         stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
         if stream_url:
             try:
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
-                    frame = future.result(timeout=20)
+                frame = await run_in_threadpool(get_frame, stream_url, camera_code)
             except Exception:
                 pass
 
@@ -875,10 +914,7 @@ async def detect_changes(
             stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
             if stream_url:
                 try:
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as pool:
-                        future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
-                        ref_frame = future.result(timeout=20)
+                    ref_frame = await run_in_threadpool(get_frame, stream_url, camera_code)
                 except Exception:
                     pass
         if ref_frame is None:
@@ -892,10 +928,7 @@ async def detect_changes(
         stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
         if stream_url:
             try:
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
-                    current_frame = future.result(timeout=20)
+                current_frame = await run_in_threadpool(get_frame, stream_url, camera_code)
             except Exception:
                 pass
 
@@ -991,10 +1024,7 @@ async def get_zone_frame(camera_code: str):
         stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
         if stream_url:
             try:
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(capture_frame, stream_url, 15.0, camera_code)
-                    frame = future.result(timeout=20)
+                frame = await run_in_threadpool(get_frame, stream_url, camera_code)
             except Exception:
                 pass
 
