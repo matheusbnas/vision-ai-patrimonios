@@ -188,6 +188,18 @@ class ApiClient {
     return data
   }
 
+  // ─── Vídeo contínuo + análise contínua (câmeras em LIVE_CAPTURE_CODES) ──
+
+  async getLiveStatus() {
+    const { data } = await this.http.get('/api/monitor/live-capture/status', { timeout: 10000 })
+    return data
+  }
+
+  // URL do último frame analisado (YOLO + IDs + contorno); `t` evita cache
+  liveAnalysisFrameUrl(code: string, t: number) {
+    return `${API_BASE}/api/monitor/live-analysis/${code}/frame.jpg?t=${t}`
+  }
+
   // ─── Alertas (polling incremental por id) ─────────────────────
 
   async getAlerts(params: { afterId?: number; notify?: boolean; limit?: number } = {}) {

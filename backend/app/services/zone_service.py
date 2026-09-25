@@ -66,7 +66,7 @@ def get_zone(camera_code: Optional[str]) -> dict:
     if not camera_code:
         return _default_zone()
     zones = _load()
-    return zones.get(camera_code, _default_zone())
+    return zones.get(camera_code, _default_zone()) if camera_code != "_coord_space" else _default_zone()
 
 
 def is_custom(camera_code: str) -> bool:

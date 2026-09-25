@@ -28,7 +28,7 @@ from app.config import (
     STATUE_OBJECT_OVERLAP,
 )
 from app.services import zone_service, risk_tracker
-from app.models.interaction import InteractionAnalyzer, _overlap_frac, is_statue_itself
+from app.models.interaction import shared_analyzer, _overlap_frac, is_statue_itself
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class PatrimonyDetector:
     def __init__(self):
         self.model = None
         self.model_loaded = False
-        self.interaction = InteractionAnalyzer()
+        self.interaction = shared_analyzer
 
     def load_model(self) -> bool:
         """Carrega o modelo YOLO"""
@@ -97,7 +97,8 @@ class PatrimonyDetector:
         return self.model_loaded
 
     def detect(self, image: np.ndarray, confidence: Optional[float] = None,
-               camera_code: Optional[str] = None) -> dict:
+               camera_code: Optional[str] = None, track: bool = False,
+               statue_track_ids: Optional[set] = None) -> dict:
         """
         Executa detecção em uma imagem, filtrando objetos de risco
         pelo quadrante (zona) do monumento.
@@ -126,7 +127,14 @@ class PatrimonyDetector:
             }
 
         conf = confidence or CONFIDENCE_THRESHOLD
-        results = self.model(image, conf=conf)
+        if track:
+            # ByteTrack: mesmo ID pra mesma pessoa entre frames seguidos. O
+            # estado do rastreador fica NESTE modelo (persist=True) — por isso
+            # a análise contínua usa um detector por câmera.
+            results = self.model.track(image, conf=conf, persist=True,
+                                       tracker="bytetrack.yaml", verbose=False)
+        else:
+            results = self.model(image, conf=conf, verbose=False)
 
         detections = []
         class_counts = Counter()
@@ -144,6 +152,7 @@ class PatrimonyDetector:
                 for box in boxes:
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
                     class_id = int(box.cls[0].item())
+                    track_id = int(box.id[0].item()) if track and box.id is not None else None
                     score = float(box.conf[0].item())
 
                     class_name = PATRIMONY_CLASSES.get(class_id, f"classe_{class_id}")
@@ -161,7 +170,14 @@ class PatrimonyDetector:
                         # estátua (None = câmera sem contorno calibrado)
                         "statue_overlap": round(_overlap_frac(bbox, statue_px), 3) if statue_px else None,
                         # A própria estátua detectada como "pessoa"
-                        "is_statue": class_name == "pessoa" and is_statue_itself(bbox, statue_px),
+                        # A própria estátua detectada como "pessoa": pela
+                        # sobreposição com o contorno ou (análise contínua)
+                        # por ser um ID que nunca se move sobre ele
+                        "is_statue": class_name == "pessoa" and (
+                            is_statue_itself(bbox, statue_px)
+                            or (track_id is not None and track_id in (statue_track_ids or ()))
+                        ),
+                        "track_id": track_id,
                     }
                     detections.append(detection)
                     class_counts[class_name] += 1
@@ -260,7 +276,8 @@ class PatrimonyDetector:
             )
             if someone_at_statue:
                 interaction_alert = self.interaction.analyze(
-                    image, tracker_key, statue_px, sensitive_px, annotated=annotated_image
+                    image, tracker_key, statue_px, sensitive_px, annotated=annotated_image,
+                    statue_boxes=[d["bbox"] for d in detections if d["is_statue"]],
                 )
             else:
                 risk_tracker.update(f"{tracker_key}::interacao", set())

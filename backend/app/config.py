@@ -67,6 +67,18 @@ VANDALISM_MODEL_FILE = os.getenv(
 DEFAULT_MAP_CENTER = {"lat": -22.9068, "lon": -43.1729}
 DEFAULT_MAP_ZOOM = 11
 
+# ─── Captura contínua de vídeo (fase 1 da cascata) ───────────────
+# Câmeras com página de vídeo aberta permanentemente num Chrome headless,
+# lendo frames a LIVE_CAPTURE_FPS (ver services/live_capture.py). Cada
+# câmera = 1 Chrome (~200-400 MB de RAM) — começar com poucas e medir em
+# GET /api/monitor/live-capture/status antes de adicionar mais.
+LIVE_CAPTURE_CODES = [c.strip() for c in os.getenv("LIVE_CAPTURE_CODES", "000056").split(",") if c.strip()]
+LIVE_CAPTURE_FPS = float(os.getenv("LIVE_CAPTURE_FPS", "4"))
+LIVE_CAPTURE_BUFFER_SECONDS = float(os.getenv("LIVE_CAPTURE_BUFFER_SECONDS", "4"))
+# Análise contínua (YOLO + rastreamento ByteTrack) sobre o vídeo ao vivo,
+# por câmera — ver services/live_analysis.py
+LIVE_ANALYSIS_FPS = float(os.getenv("LIVE_ANALYSIS_FPS", "2"))
+
 # ─── Monitoramento contínuo em background ────────────────────────
 # Varre todas as câmeras dos patrimônios sequencialmente (uma por vez,
 # não em paralelo — evita sobrecarregar a máquina que roda o YOLO/HF).

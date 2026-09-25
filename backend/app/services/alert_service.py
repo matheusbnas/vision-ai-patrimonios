@@ -15,6 +15,13 @@ from app.config import NOTIFY_COOLDOWN_SECONDS
 logger = logging.getLogger(__name__)
 
 MAX_ALERTS = 500
+# O mesmo alerta (câmera + origem + nível) não entra de novo no histórico
+# antes disto — a análise contínua avalia 2x/s e registraria o mesmo
+# "pessoa em cima da estátua" dezenas de vezes seguidas.
+DEDUP_SECONDS = 60
+
+# (camera, source, level) → último alerta registrado
+_last_stored: dict[tuple[str, str, str], dict] = {}
 
 _LEVEL_RANK = {"MODERADO": 1, "ALTO": 2, "CRÍTICO": 3}
 
@@ -52,7 +59,11 @@ _id_counter = itertools.count(1)
 def add_alert(camera_code: str, camera_name: str, level: str, message: str,
               source: str, objects: Optional[list[str]] = None) -> dict:
     """Registra um novo alerta e retorna o registro criado."""
+    key = (camera_code, source, level)
     with _lock:
+        prev = _last_stored.get(key)
+        if prev and time.time() - prev["timestamp"] < DEDUP_SECONDS:
+            return prev
         notify = _should_notify(camera_code, source, level)
     entry = {
         "id": next(_id_counter),
@@ -68,6 +79,7 @@ def add_alert(camera_code: str, camera_name: str, level: str, message: str,
         "notify": notify,  # true = frontend toca som + mostra mensagem
     }
     with _lock:
+        _last_stored[key] = entry
         _alerts.append(entry)
         if len(_alerts) > MAX_ALERTS:
             del _alerts[: len(_alerts) - MAX_ALERTS]

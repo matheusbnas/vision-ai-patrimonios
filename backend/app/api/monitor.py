@@ -290,13 +290,17 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0,
                 if not has_video_data:
                     logger.warning(f"Playwright: vídeo não decodificou a tempo (tentativa {tentativa+1})")
 
-                # Screenshot
-                screenshot = page.screenshot(type="jpeg", quality=90)
+                # Frame direto do <video> (16:9, resolução do vídeo) — MESMO
+                # espaço de coordenadas da captura contínua (live_capture).
+                # O screenshot da página (800x600) mostrava o vídeo cortado
+                # nas laterais, e as zonas calibradas não batiam entre os dois.
+                from app.services.live_capture import _GRAB_JS, GRAB_MAX_WIDTH, _decode
+                grabbed = page.evaluate(_GRAB_JS, [0.9, GRAB_MAX_WIDTH])
+                frame_rgb = _decode(grabbed["data"]) if grabbed else None
+                if frame_rgb is None:
+                    screenshot = page.screenshot(type="jpeg", quality=90)
+                    frame_rgb = np.array(Image.open(io.BytesIO(screenshot)).convert("RGB"))
                 browser.close()
-            
-            img = Image.open(io.BytesIO(screenshot))
-            frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             if _is_stream_error_frame(frame_rgb):
                 logger.warning(f"Playwright: capturou tela de 'Reconectando' (tentativa {tentativa+1}), não é vídeo real")
@@ -367,6 +371,13 @@ def get_frame(stream_url: str, camera_code: str, timeout_sec: float = 15.0,
     Bloqueante — em rotas async, chamar via run_in_threadpool.
     max_age=0 força captura nova (ex.: print manual).
     """
+    # Câmera com captura contínua (live_capture): frame de agora, sem abrir
+    # navegador. max_age=0 (print manual) também aceita — o frame é de <5s.
+    from app.services import live_capture
+    live = live_capture.latest_frame(camera_code, max_age=5.0)
+    if live is not None:
+        return live
+
     with _frame_locks_guard:
         lock = _frame_locks.setdefault(camera_code, threading.Lock())
     with lock:
@@ -520,6 +531,11 @@ async def monitor_live(
     camera_name = camera.get("name", f"Câmera {camera_code}")
     stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
     
+    from app.services import live_analysis
+    live = live_analysis.latest_result(camera_code)
+    if live:
+        return _live_to_response(live, camera_code, include_image)
+
     # 2. Monta resposta base
     response = {
         "success": True,
@@ -596,8 +612,18 @@ async def monitor_multi(
     if not camera_codes:
         raise HTTPException(status_code=400, detail="Nenhum código de câmera informado")
     
+    from app.services import live_analysis
+
     results = []
     for code in camera_codes[:MAX_BATCH_CAMERAS]:
+        # Câmera com vídeo contínuo: a análise (YOLO + rastreamento) já roda
+        # sozinha a cada ~0,5s — devolve o resultado pronto em vez de
+        # capturar e detectar de novo (e sem registrar alertas duplicados)
+        live = live_analysis.latest_result(code)
+        if live:
+            results.append(_live_to_response(live, code, include_image))
+            continue
+
         cam_result = {
             "camera_code": code,
             "success": False,
@@ -1026,6 +1052,64 @@ async def delete_zone(camera_code: str):
     """Remove a calibração custom da câmera, voltando ao quadrante padrão."""
     default = zone_service.reset_zone(camera_code)
     return {"success": True, "camera_code": camera_code, "zone": default}
+
+
+# ─── Captura contínua (fase 1) + análise contínua (fase 2) ──────
+
+def _live_to_response(live: dict, code: str, include_image: bool) -> dict:
+    """Resultado da análise contínua no mesmo formato de /live e /multi."""
+    from app.services import live_analysis
+    resp = {
+        "success": True,
+        "camera_code": code,
+        "camera_name": live["camera_name"],
+        "stream_url": "",
+        "timestamp": live["timestamp"],
+        "frame_captured": True,
+        "live": True,  # veio da análise contínua (vídeo), não de print
+        "yolo_detection": live["yolo_detection"],
+        "risk_alert": live["risk_alert"],
+        "interaction_alert": live["interaction_alert"],
+        "loitering_alert": live["loitering_alert"],
+        "people_near_statue": live["people_near_statue"],
+        "hf_prediction": None,
+        "processing_time_ms": live["processing_time_ms"],
+    }
+    if include_image:
+        jpg = live_analysis.latest_jpeg(code)
+        resp["image_base64"] = base64.b64encode(jpg).decode("utf-8") if jpg else None
+    return resp
+
+
+@router.get("/live-capture/status")
+async def live_capture_status():
+    """FPS real, reconexões, idade do último frame e RAM/CPU do Chrome por câmera."""
+    from app.services import live_capture
+    from app.services import live_analysis
+    return {"success": True, **live_capture.status(), "analysis": live_analysis.status()}
+
+
+@router.get("/live-analysis/{camera_code}/frame.jpg")
+async def live_analysis_frame(camera_code: str):
+    """Último frame ANALISADO (caixas do YOLO + IDs do rastreamento + contorno)."""
+    from fastapi.responses import Response
+    from app.services import live_analysis
+    jpg = live_analysis.latest_jpeg(camera_code)
+    if jpg is None:
+        raise HTTPException(status_code=404, detail="Sem análise recente para esta câmera")
+    return Response(content=jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/live-capture/{camera_code}/frame.jpg")
+async def live_capture_frame(camera_code: str):
+    """Último frame da captura contínua (404 se a câmera não tem worker ou está sem vídeo)."""
+    from fastapi.responses import Response
+    from app.services import live_capture
+    frame = live_capture.latest_frame(camera_code, max_age=10.0)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="Sem frame recente para esta câmera")
+    _, buf = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/statue/{camera_code}")

@@ -67,8 +67,10 @@ async def lifespan(app: FastAPI):
 
     # Sobe o loop de monitoramento contínuo (varre todas as câmeras dos
     # patrimônios em background, mesmo sem ninguém olhando o frontend)
-    from app.services import background_monitor
+    from app.services import background_monitor, live_capture, live_analysis
     monitor_task = background_monitor.start()
+    live_capture.start()
+    live_analysis.start()
 
     # Renova token + KEYs de stream antes de vencerem (~1h), pra nenhuma
     # requisição/captura esbarrar em "Token expirado" e pagar o login na hora.
@@ -88,6 +90,8 @@ async def lifespan(app: FastAPI):
     logger.info("✅ API pronta para receber requisições")
     yield
     logger.info("🛑 API encerrando...")
+    live_analysis.stop()
+    live_capture.stop()
     refresh_task.cancel()
 
     if monitor_task:

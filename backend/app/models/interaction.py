@@ -99,15 +99,16 @@ class InteractionAnalyzer:
         self.model = None
         self.model_loaded = False
         self._load_failed = False
+        # Modelos ultralytics não são thread-safe — a análise contínua
+        # (live_analysis) e as rotas/background usam o mesmo analisador
+        self._infer_lock = threading.Lock()
 
     def load_model(self) -> bool:
         if self.model_loaded or self._load_failed:
             return self.model_loaded
         try:
             from ultralytics import YOLO
-            # Se o arquivo não existir, o ultralytics baixa o yolo11n-pose
-            # oficial para esse caminho.
-            self.model = YOLO(str(Path(POSE_MODEL)))
+            self.model = YOLO(str(Path(POSE_MODEL)))  # ultralytics baixa se não existir
             self.model_loaded = True
             logger.info(f"Modelo YOLO-pose carregado: {POSE_MODEL}")
         except Exception as e:
@@ -118,7 +119,8 @@ class InteractionAnalyzer:
 
     def analyze(self, image: np.ndarray, camera_code: str,
                 statue_px: tuple, sensitive_px: Optional[tuple],
-                annotated: Optional[np.ndarray] = None) -> Optional[dict]:
+                annotated: Optional[np.ndarray] = None,
+                statue_boxes: Optional[list] = None) -> Optional[dict]:
         """
         Roda pose num recorte ao redor da estátua (pessoas pequenas no
         quadro ganham resolução) e devolve o alerta de interação, se houver.
@@ -138,7 +140,8 @@ class InteractionAnalyzer:
             return None
 
         try:
-            results = self.model(crop, conf=0.3, verbose=False)
+            with self._infer_lock:
+                results = self.model(crop, conf=0.3, verbose=False)
         except Exception as e:
             logger.warning(f"Erro YOLO-pose: {e}")
             return None
@@ -158,7 +161,8 @@ class InteractionAnalyzer:
                     pbox = (bx[0] + cx1, bx[1] + cy1, bx[2] + cx1, bx[3] + cy1)
                     # Só quem está junto da estátua interessa — e a própria
                     # estátua (figura humana) também sai pelo pose
-                    if _overlap_frac(pbox, statue_px) < 0.1 or is_statue_itself(pbox, statue_px):
+                    if (_overlap_frac(pbox, statue_px) < 0.1 or is_statue_itself(pbox, statue_px)
+                            or any(iou(pbox, sb) >= 0.5 for sb in (statue_boxes or []))):
                         continue
 
                 if sensitive_px:
@@ -204,3 +208,8 @@ class InteractionAnalyzer:
             "events": sorted(events),
             "dwell_seconds": round(max(dwell.values()), 1) if dwell else 0.0,
         }
+
+
+# Instância única compartilhada por todos os detectores (um só modelo de
+# pose na memória, mesmo com um detector por câmera na análise contínua)
+shared_analyzer = InteractionAnalyzer()

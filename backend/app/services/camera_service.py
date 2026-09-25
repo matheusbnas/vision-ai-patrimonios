@@ -3,7 +3,10 @@ Serviço de gerenciamento de câmeras
 Comunicação com a API externa de câmeras do Rio de Janeiro
 """
 
+import base64
 import json
+import re
+import threading
 import time
 import random
 import logging
@@ -21,6 +24,16 @@ logger = logging.getLogger(__name__)
 
 TOKEN_FILE = CACHE_DIR / "jwt_token.json"
 CAMERAS_CACHE_FILE = CACHE_DIR / "cameras_cache.json"
+
+
+def _jwt_exp(token: str) -> float:
+    """Campo exp (unix) de um JWT, sem validar assinatura; 0 se ilegível."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return float(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
+    except Exception:
+        return 0.0
 
 
 def _is_retryable(error: requests.exceptions.RequestException) -> bool:
@@ -42,6 +55,12 @@ class CameraService:
         self._cameras_cache: list[dict] | None = None
         self._cameras_cache_time: float = 0
         self._last_auth_time: float = 0
+        # KEY de stream (JWT de ~60min, a mesma pra todas as câmeras) —
+        # renovada via refresh_url/refreshToken, ver _fresh_stream_key
+        self._stream_key: Optional[str] = None
+        self._stream_key_exp: float = 0
+        self._stream_key_lock = threading.Lock()
+        self._last_key_relogin: float = 0
         self._load_token()
 
     # ─── Gerenciamento de Token ──────────────────────────────────
@@ -179,6 +198,8 @@ class CameraService:
                 # que as KEYs de stream, e uma leitura na borda serve dados já
                 # rejeitados pela Tixxi ("Acesso negado: Token expirado").
                 if cached and (allow_stale or (time.time() - cache_time) < 3300):  # 55min
+                    if not allow_stale:
+                        self._cameras_cache_time = cache_time
                     return cached
         except Exception as e:
             logger.warning(f"Erro ao ler cache: {e}")
@@ -205,7 +226,10 @@ class CameraService:
 
     def get_all_cameras(self) -> list[dict]:
         """Obtém todas as câmeras (com paginação automática)"""
-        # Tenta cache primeiro
+        # Cache em memória primeiro — o arquivo tem ~6 MB e era relido do
+        # disco a cada get_camera_by_code
+        if self._cameras_cache and time.time() - self._cameras_cache_time < 3300:
+            return self._cameras_cache
         cached = self._load_cameras_cache()
         if cached:
             self._cameras_cache = cached
@@ -235,6 +259,7 @@ class CameraService:
 
             if all_cameras:
                 self._cameras_cache = all_cameras
+                self._cameras_cache_time = time.time()
                 self._save_cameras_cache(all_cameras)
 
         except Exception as e:
@@ -248,6 +273,7 @@ class CameraService:
         Usado pela renovação periódica (main.py) e quando uma captura recebe 401.
         """
         self._last_auth_time = 0
+        self._stream_key_exp = 0  # força KEY de stream nova no próximo uso
         if not self.authenticate():
             return False
         # O login já devolve as câmeras; se não devolveu, busca paginado.
@@ -257,7 +283,7 @@ class CameraService:
         return True
 
     def get_camera_by_code(self, code: str) -> Optional[dict]:
-        """Busca uma câmera específica pelo código"""
+        """Busca uma câmera específica pelo código (stream_url com KEY válida)"""
         cameras = self.get_all_cameras()
         for cam in cameras:
             # A API externa retorna "code", mas aceitamos vários nomes
@@ -265,8 +291,55 @@ class CameraService:
                 cam.get(k) == code
                 for k in ("code", "codigo", "camera_code")
             ):
-                return cam
+                return self._with_fresh_key(cam)
         return None
+
+    # ─── KEY de stream ───────────────────────────────────────────
+    # O login da Tixxi devolve as câmeras com uma KEY gerada ~1h ANTES
+    # (já vencida ou quase: "Acesso negado: Token expirado"), então só
+    # refazer o login não resolve. Cada câmera traz refresh_token (~8h) e
+    # refresh_url; POST {"refreshToken": ...} nesse endpoint devolve
+    # {"token": <KEY nova, 60min>} — a mesma KEY vale pra todas as câmeras.
+
+    def _fresh_stream_key(self, refresh_token: str, refresh_url: str) -> Optional[str]:
+        with self._stream_key_lock:
+            # Reaproveita até 5min antes de vencer
+            if self._stream_key and time.time() < self._stream_key_exp - 300:
+                return self._stream_key
+            try:
+                resp = requests.post(refresh_url, json={"refreshToken": refresh_token},
+                                     timeout=10, verify=False)
+                token = resp.json().get("token") if resp.status_code == 200 else None
+            except Exception as e:
+                logger.warning(f"Erro ao renovar KEY de stream: {e}")
+                token = None
+            if not token:
+                logger.warning(f"Renovação da KEY de stream falhou (HTTP {getattr(resp, 'status_code', '?')})"
+                               if 'resp' in locals() else "Renovação da KEY de stream falhou")
+                return None
+            self._stream_key = token
+            self._stream_key_exp = _jwt_exp(token) or (time.time() + 3600)
+            logger.info("🔑 KEY de stream renovada (válida por ~60min)")
+            return token
+
+    def _with_fresh_key(self, cam: dict) -> dict:
+        """Cópia da câmera com a KEY da stream_url trocada por uma válida."""
+        url = cam.get("stream_url") or ""
+        if "KEY=" not in url or not cam.get("refresh_token") or not cam.get("refresh_url"):
+            return cam
+        key = self._fresh_stream_key(cam["refresh_token"], cam["refresh_url"])
+        if not key and time.time() - self._last_key_relogin > 300:
+            # refresh_token (~8h) provavelmente venceu: login novo traz um
+            # cadastro com refresh_token atualizado — tenta uma vez a cada 5min
+            self._last_key_relogin = time.time()
+            logger.warning("Renovação da KEY falhou — refazendo login para obter refresh_token novo")
+            if self.refresh():
+                fresh = next((c for c in self.get_all_cameras() if c.get("code") == cam.get("code")), cam)
+                if fresh.get("refresh_token"):
+                    key = self._fresh_stream_key(fresh["refresh_token"], fresh.get("refresh_url") or cam["refresh_url"])
+        if not key:
+            return cam  # mantém a KEY do cadastro (pode estar vencida)
+        return {**cam, "stream_url": re.sub(r"KEY=[^&]*", f"KEY={key}", url)}
 
     def _get_stream_key(self) -> Optional[str]:
         """Obtém chave de stream do servidor.

@@ -66,9 +66,17 @@ def _process_camera(code: str) -> None:
 
     monitor_api.save_camera_snapshot(frame, code, camera_name, "monitoramento")
 
-    result = detection_service.detect_full(frame, camera_id=code)
-    monitor_api.record_risk_alert(code, camera_name, result.get("risk_alert"))
-    monitor_api.record_interaction_alert(code, camera_name, result.get("interaction_alert"))
+    # Câmera com análise contínua (live_analysis): YOLO/pose/alertas já
+    # rodam lá, com rastreamento — aqui só a comparação SSIM, usando as
+    # detecções de lá pra saber onde há gente/veículo
+    from app.services import live_analysis
+    live = live_analysis.latest_result(code)
+    if live:
+        result = {"yolo_detection": live["yolo_detection"]}
+    else:
+        result = detection_service.detect_full(frame, camera_id=code)
+        monitor_api.record_risk_alert(code, camera_name, result.get("risk_alert"))
+        monitor_api.record_interaction_alert(code, camera_name, result.get("interaction_alert"))
 
     # Pessoas/veículos no quadro — excluídos do diff SSIM (senão alguém
     # sentado ao lado da estátua vira "X% do monumento alterado").

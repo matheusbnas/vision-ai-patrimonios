@@ -194,6 +194,37 @@ export default function MonitoramentoPage() {
   useEffect(() => {
     try { localStorage.setItem('monitoramento.viewMode', viewMode) } catch {}
   }, [viewMode])
+
+  // Câmeras com vídeo + análise contínua no backend (LIVE_CAPTURE_CODES):
+  // no modo Prints, mostram o último frame ANALISADO (~2/s) em vez do
+  // print do ciclo de 10s. code → FPS da análise (só as que estão ao vivo)
+  const [liveCams, setLiveCams] = useState<Record<string, number>>({})
+  const [liveTick, setLiveTick] = useState(0)
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const data = await api.getLiveStatus()
+        const analysisFps: Record<string, number> = {}
+        for (const a of data.analysis ?? []) analysisFps[a.camera_code] = a.analysis_fps
+        const next: Record<string, number> = {}
+        for (const c of data.cameras ?? []) {
+          if (c.state === 'ao vivo') next[c.camera_code] = analysisFps[c.camera_code] ?? 0
+        }
+        setLiveCams(next)
+      } catch {
+        setLiveCams({})
+      }
+    }
+    load()
+    const id = setInterval(load, 10000)
+    return () => clearInterval(id)
+  }, [])
+  const hasVisibleLive = viewMode === 'snapshot' && selectedCodes.some((c) => c in liveCams)
+  useEffect(() => {
+    if (!hasVisibleLive) return
+    const id = setInterval(() => setLiveTick((t) => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [hasVisibleLive])
   // Resultado do "print" puro por câmera (sem YOLO/HF) — só pra checar
   // rapidamente se a câmera está entregando vídeo, isolado da IA.
   const [snapshots, setSnapshots] = useState<Record<string, {
@@ -711,7 +742,13 @@ export default function MonitoramentoPage() {
                     {/* Stream ao vivo + overlay — ocupa a maior parte da tela */}
                     <div className="relative bg-black flex-1" style={{ minHeight: selectedCodes.length > 4 ? '240px' : '420px' }}>
                       {viewMode === 'snapshot' ? (
-                        frame?.image_base64 ? (
+                        code in liveCams ? (
+                          <img
+                            src={api.liveAnalysisFrameUrl(code, liveTick)}
+                            alt={`Análise ao vivo ${code}`}
+                            className="absolute inset-0 w-full h-full object-contain"
+                          />
+                        ) : frame?.image_base64 ? (
                           <img
                             src={`data:image/jpeg;base64,${frame.image_base64}`}
                             alt={`Print analisado ${code}`}
@@ -801,6 +838,13 @@ export default function MonitoramentoPage() {
                         {viewMode === 'live' ? (
                           <span className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold animate-pulse shadow-lg">
                             🔴 AO VIVO
+                          </span>
+                        ) : code in liveCams ? (
+                          <span
+                            className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold shadow-lg"
+                            title="Vídeo contínuo com YOLO + rastreamento rodando no servidor"
+                          >
+                            🔴 AO VIVO · IA {liveCams[code].toFixed(1)}/s
                           </span>
                         ) : frame?.image_base64 && (
                           <span className={`text-white text-[10px] px-2 py-0.5 rounded font-bold shadow-lg ${
