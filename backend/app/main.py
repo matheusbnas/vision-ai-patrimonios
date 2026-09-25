@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from app.config import HOST, PORT, DEBUG, CORS_ORIGINS, ASSETS_DIR
+from app.config import HOST, PORT, DEBUG, CORS_ORIGINS, ASSETS_DIR, TOKEN_REFRESH_SECONDS
 from app.services.camera_service import CameraService
 from app.services.detection_service import DetectionService
 
@@ -70,9 +70,25 @@ async def lifespan(app: FastAPI):
     from app.services import background_monitor
     monitor_task = background_monitor.start()
 
+    # Renova token + KEYs de stream antes de vencerem (~1h), pra nenhuma
+    # requisição/captura esbarrar em "Token expirado" e pagar o login na hora.
+    async def _token_refresher():
+        loop = asyncio.get_event_loop()
+        while True:
+            await asyncio.sleep(TOKEN_REFRESH_SECONDS)
+            try:
+                ok = await loop.run_in_executor(None, camera_service.refresh)
+                if not ok:
+                    logger.warning("⚠️ Renovação periódica do token falhou — nova tentativa no próximo ciclo")
+            except Exception as e:
+                logger.warning(f"⚠️ Erro na renovação periódica do token: {e}")
+
+    refresh_task = asyncio.create_task(_token_refresher())
+
     logger.info("✅ API pronta para receber requisições")
     yield
     logger.info("🛑 API encerrando...")
+    refresh_task.cancel()
 
     if monitor_task:
         monitor_task.cancel()

@@ -72,10 +72,19 @@ class CameraService:
     # ─── Requisições com Retry ───────────────────────────────────
 
     def _request_with_retry(self, method: str, url: str,
-                            max_retries: int = 2, **kwargs) -> requests.Response:
+                            max_retries: int = 2, reauth: bool = True,
+                            **kwargs) -> requests.Response:
         for attempt in range(max_retries + 1):
             try:
                 resp = self.session.request(method, url, **kwargs)
+                # Token rejeitado antes do expires_at previsto (revogado,
+                # relógio diferente etc.) — faz login de novo e repete uma vez.
+                if resp.status_code == 401 and reauth:
+                    logger.warning("API de câmeras respondeu 401 — renovando token")
+                    reauth = False
+                    self._last_auth_time = 0  # ignora o cooldown nesse caso
+                    if self.authenticate():
+                        resp = self.session.request(method, url, **kwargs)
                 if resp.status_code == 429 and attempt < max_retries:
                     wait = (10 * (2 ** attempt)) + random.uniform(0, 3)
                     logger.warning(
@@ -115,6 +124,7 @@ class CameraService:
                 json=payload,
                 timeout=30,
                 max_retries=1,
+                reauth=False,
             )
             data = resp.json()
             self._last_auth_time = time.time()
@@ -157,7 +167,7 @@ class CameraService:
         except Exception as e:
             logger.warning(f"Erro ao salvar cache: {e}")
 
-    def _load_cameras_cache(self) -> Optional[list[dict]]:
+    def _load_cameras_cache(self, allow_stale: bool = False) -> Optional[list[dict]]:
         try:
             if CAMERAS_CACHE_FILE.exists():
                 with open(CAMERAS_CACHE_FILE) as f:
@@ -168,7 +178,7 @@ class CameraService:
                 # sem essa margem, o cache "válido" por 1h expira no MESMO instante
                 # que as KEYs de stream, e uma leitura na borda serve dados já
                 # rejeitados pela Tixxi ("Acesso negado: Token expirado").
-                if cached and (time.time() - cache_time) < 3300:  # 55min
+                if cached and (allow_stale or (time.time() - cache_time) < 3300):  # 55min
                     return cached
         except Exception as e:
             logger.warning(f"Erro ao ler cache: {e}")
@@ -202,7 +212,10 @@ class CameraService:
             return cached
 
         if not self._ensure_auth():
-            return []
+            # Login falhou (API fora/cooldown): melhor o cadastro antigo do que
+            # nenhuma câmera — as KEYs podem estar vencidas, mas a próxima
+            # renovação bem-sucedida corrige.
+            return self._load_cameras_cache(allow_stale=True) or []
 
         all_cameras = []
         page = 1
@@ -227,7 +240,21 @@ class CameraService:
         except Exception as e:
             logger.error(f"Erro ao buscar todas as câmeras: {e}")
 
-        return all_cameras
+        return all_cameras or self._load_cameras_cache(allow_stale=True) or []
+
+    def refresh(self) -> bool:
+        """Força login novo e recarrega o cadastro de câmeras (novas KEYs de stream).
+
+        Usado pela renovação periódica (main.py) e quando uma captura recebe 401.
+        """
+        self._last_auth_time = 0
+        if not self.authenticate():
+            return False
+        # O login já devolve as câmeras; se não devolveu, busca paginado.
+        if not self._load_cameras_cache():
+            self.get_all_cameras()
+        logger.info("🔑 Token e KEYs de stream das câmeras renovados")
+        return True
 
     def get_camera_by_code(self, code: str) -> Optional[dict]:
         """Busca uma câmera específica pelo código"""

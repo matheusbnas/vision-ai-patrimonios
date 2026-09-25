@@ -254,7 +254,7 @@ def capture_frame(stream_url: str, timeout_sec: float = 10.0,
                     browser.close()
                     # Tenta renovar via camera_service
                     try:
-                        if camera_service:
+                        if camera_service and camera_service.refresh():
                             cam = camera_service.get_camera_by_code(
                                 stream_url.split("CODE=")[1].split("&")[0]
                                 if "CODE=" in stream_url else ""

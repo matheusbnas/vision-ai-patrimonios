@@ -36,6 +36,10 @@ STREAM_KEY = os.getenv("STREAM_KEY", "")
 # Usado pelo proxy em app/api/video_proxy.py — ver comentário lá do porquê.
 VIDEO_PAGE_BASE_URL = os.getenv("VIDEO_PAGE_BASE_URL", "http://10.50.3.11:5001")
 
+# Intervalo da renovação antecipada do token da API + KEYs de stream
+# (que vencem em ~1h). 45min deixa folga antes do vencimento.
+TOKEN_REFRESH_SECONDS = int(os.getenv("TOKEN_REFRESH_SECONDS", str(45 * 60)))
+
 # ─── Webhook OctaVision ──────────────────────────────────────────
 # Token exigido em ?token=... no endpoint /api/webhooks/octavision.
 OCTAVISION_WEBHOOK_TOKEN = os.getenv("OCTAVISION_WEBHOOK_TOKEN", "")

@@ -290,6 +290,14 @@ export default function MonitoramentoPage() {
     }
   }, [selectedCodes, fetchStreamUrls])
 
+  // No modo "Ao vivo", a KEY embutida em cada stream_url vence em ~1h —
+  // busca URLs novas a cada 45min (o backend já renova o token antes disso).
+  useEffect(() => {
+    if (viewMode !== 'live' || selectedCodes.length === 0) return
+    const id = setInterval(() => fetchStreamUrls(selectedCodes), 45 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [viewMode, selectedCodes, fetchStreamUrls])
+
   // Sem recarregamento automático do iframe — só manual, pelo botão
   // "🔄 Recarregar" em cada câmera (ou "🔗 Pop-up" numa janela separada).
 
