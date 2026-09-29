@@ -64,6 +64,10 @@ DYNAMIC_RATE = 0.2
 DYNAMIC_LEVEL = 0.3
 # Comparações de aprendizado (sem alerta) logo após criar a referência
 LEARN_CHECKS = 4
+# Uma única mancha contínua a partir disto (% da estátua visível) já é ALTO
+BLOB_ALTO_PCT = 1.5
+# Comparação com mais que isto alterado não entra no aprendizado (frame ruim)
+LEARN_MAX_CHANGE = 40.0
 
 
 def _b64(img_rgb: np.ndarray) -> str:
@@ -411,6 +415,13 @@ class ChangeDetector:
         baseline = float(np.median(baseline_hist)) if baseline_hist else 0.0
         increase = max(change_pct - baseline, 0.0)
         ssim_alert_level = self._ssim_alert_level(increase)
+        # Dano CONCENTRADO (peça arrancada, óculos do Drummond): uma mancha
+        # contínua só é pequena perto da estátua inteira, mas é o alvo
+        # clássico de furto — basta ela pra ser ALTO
+        largest_blob = max((c["area_percent"] for c in changes), default=0.0)
+        if (largest_blob >= BLOB_ALTO_PCT and increase >= BLOB_ALTO_PCT
+                and _LEVEL_RANK[ssim_alert_level] < _LEVEL_RANK["ALTO"]):
+            ssim_alert_level = "ALTO"
 
         # ─── Fundo que se mexe (mar, guarda-sol, areia pelas frestas) ──
         # Fase de APRENDIZADO: as primeiras LEARN_CHECKS comparações depois
@@ -420,7 +431,11 @@ class ChangeDetector:
         learning = False
         if dynamic is not None and dynamic.shape == observed.shape:
             n = ref_data.get("learn_n", 0)
-            if n < LEARN_CHECKS:
+            if n < LEARN_CHECKS and change_pct >= LEARN_MAX_CHANGE:
+                # Frame corrompido/cena toda diferente: não entra no aprendizado
+                learning = True
+                ssim_alert_level, increase = "NORMAL", 0.0
+            elif n < LEARN_CHECKS:
                 learning = True
                 ref_data.setdefault("learn_chg", np.zeros_like(dynamic))
                 ref_data.setdefault("learn_obs", np.zeros_like(dynamic))

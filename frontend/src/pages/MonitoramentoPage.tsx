@@ -10,6 +10,7 @@ import {
   Target,
   Users,
   X,
+  FlaskConical,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { CameraClockOverlay, CameraStatusDot } from '../components/CameraClock'
@@ -239,6 +240,32 @@ function CameraCodeGroup({
       </div>
     </div>
   )
+}
+
+// Danos simulados disponíveis no teste (mesmos ids de backend/app/services/damage_sim.py)
+const SIM_SCENARIOS = [
+  { id: 'pichacao', label: 'Pichação (spray)' },
+  { id: 'tinta', label: 'Tinta jogada' },
+  { id: 'quebra_cabeca', label: 'Cabeça quebrada' },
+  { id: 'quebra_braco', label: 'Braço/mão quebrado' },
+  { id: 'remocao_peca', label: 'Peça removida (óculos)' },
+  { id: 'cobertura', label: 'Estátua coberta' },
+  { id: 'derrubada', label: 'Estátua derrubada/levada' },
+]
+
+interface SimResult {
+  camera_code: string
+  cenario_label: string
+  sem_dano_pct: number | null
+  com_dano_pct: number
+  increase_pct: number
+  level: string
+  would_alert: boolean
+  still_learning?: boolean
+  verdict: string
+  reference_roi_base64?: string
+  current_roi_base64?: string
+  highlight_image_base64?: string
 }
 
 interface MonitoramentoProps {
@@ -583,6 +610,23 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
 
   // Salvar a imagem COM as marcações da IA (registro/evidência): grava no
   // servidor (assets/images/<câmera>/..._print_ia_<data>.jpg) e baixa uma cópia
+  // Teste de detecção: dano simulado na estátua (servidor, sem gerar alerta)
+  const [simScenario, setSimScenario] = useState('pichacao')
+  const [simLoading, setSimLoading] = useState(false)
+  const [simResult, setSimResult] = useState<SimResult | null>(null)
+  const runSimulation = async () => {
+    const code = selectedCodes[0]
+    if (!code) return
+    setSimLoading(true)
+    try {
+      setSimResult(await api.simulateDamage(code, simScenario))
+    } catch (err: any) {
+      window.alert(err?.response?.data?.detail || 'Não foi possível simular o dano agora')
+    } finally {
+      setSimLoading(false)
+    }
+  }
+
   // Imagem ampliada (clique nas miniaturas da comparação)
   const [zoomImage, setZoomImage] = useState<{ src: string; label: string } | null>(null)
   useEffect(() => {
@@ -833,6 +877,32 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
             >
               <Target size={12} />
               🎯 Calibrar Zona
+            </button>
+          </div>
+
+          {/* Teste da detecção: dano simulado na imagem atual (não gera alerta) */}
+          <div className="mt-3 pt-3 border-t border-gray-100 space-y-1.5">
+            <p className="text-[10px] font-semibold text-gray-500 uppercase flex items-center gap-1">
+              <FlaskConical size={11} /> Testar detecção de dano
+            </p>
+            <p className="text-[9px] text-gray-400">
+              Aplica um dano simulado na estátua sobre a imagem atual da câmera {selectedCodes[0] ?? ''} e mostra se
+              seria detectado. Não gera alerta nem altera o monitoramento.
+            </p>
+            <select
+              value={simScenario}
+              onChange={(e) => setSimScenario(e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white"
+            >
+              {SIM_SCENARIOS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+            <button
+              onClick={runSimulation}
+              disabled={selectedCodes.length === 0 || simLoading}
+              className="w-full py-1.5 px-3 rounded-lg text-xs font-medium bg-purple-50 text-purple-800 hover:bg-purple-100 border border-purple-200 flex items-center justify-center gap-2 disabled:opacity-50"
+            >
+              {simLoading ? <RefreshCw size={12} className="animate-spin" /> : <FlaskConical size={12} />}
+              {simLoading ? 'Simulando…' : 'Simular dano'}
             </button>
           </div>
         </div>
@@ -1312,6 +1382,57 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
 
       {calibratingCode && (
         <ZoneCalibrator cameraCode={calibratingCode} onClose={() => setCalibratingCode(null)} />
+      )}
+
+      {/* Resultado do teste de dano simulado */}
+      {simResult && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setSimResult(null)}>
+          <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full p-4 space-y-3" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                <FlaskConical size={16} className="text-purple-600" />
+                Teste: {simResult.cenario_label} · câmera {simResult.camera_code}
+              </h3>
+              <button onClick={() => setSimResult(null)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+            </div>
+            <div className={`rounded-lg p-3 text-sm font-medium ${simResult.would_alert ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-800'}`}>
+              {simResult.would_alert ? '✅ ' : '⚠️ '}{simResult.verdict}
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center text-xs">
+              <div className="bg-gray-50 rounded-lg p-2">
+                <p className="text-lg font-bold text-gray-700">{simResult.sem_dano_pct != null ? `${simResult.sem_dano_pct.toFixed(1)}%` : '—'}</p>
+                <p className="text-[10px] text-gray-500">Alterada SEM dano (agora)</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2">
+                <p className="text-lg font-bold text-red-600">{simResult.com_dano_pct.toFixed(1)}%</p>
+                <p className="text-[10px] text-gray-500">Alterada COM o dano</p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-2">
+                <p className="text-lg font-bold text-gray-700">{simResult.level}</p>
+                <p className="text-[10px] text-gray-500">Nível (+{simResult.increase_pct.toFixed(1)} p.p.)</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { src: simResult.reference_roi_base64, label: 'Referência' },
+                { src: simResult.current_roi_base64, label: 'Agora + dano simulado' },
+                { src: simResult.highlight_image_base64, label: 'Alterado (vermelho) · encoberto (azul)' },
+              ].map((im) => im.src && (
+                <figure key={im.label} className="rounded ring-1 ring-gray-200 overflow-hidden cursor-zoom-in"
+                  onClick={() => setZoomImage({ src: `data:image/jpeg;base64,${im.src}`, label: im.label })}>
+                  <img src={`data:image/jpeg;base64,${im.src}`} alt={im.label} className="w-full h-64 object-contain bg-black" />
+                  <figcaption className="text-[10px] text-gray-500 text-center py-1">{im.label}</figcaption>
+                </figure>
+              ))}
+            </div>
+            {simResult.still_learning && (
+              <p className="text-[11px] text-amber-700">
+                A câmera ainda está na fase de aprendizado do fundo: o resultado pode incluir fundo (mar, areia) que depois sai da conta.
+              </p>
+            )}
+            <p className="text-[10px] text-gray-400">Simulação feita numa cópia — nenhum alerta foi registrado e o monitoramento não foi alterado.</p>
+          </div>
+        </div>
       )}
 
       {/* Imagem ampliada — fecha no clique fora, no X ou com Esc */}

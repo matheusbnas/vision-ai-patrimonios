@@ -1151,6 +1151,98 @@ async def live_capture_frame(camera_code: str):
     return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@router.get("/simulate/scenarios")
+async def simulate_scenarios():
+    from app.services import damage_sim
+    return {"success": True, "scenarios": [{"id": k, "label": v} for k, v in damage_sim.SCENARIOS.items()]}
+
+
+@router.post("/simulate/{camera_code}")
+async def simulate_damage(camera_code: str, cenario: str = Query(..., description="pichacao, tinta, quebra_cabeca, ...")):
+    """
+    TESTE da detecção: aplica um dano simulado na estátua sobre a imagem
+    ATUAL da câmera e roda a mesma comparação que decide o alerta — numa
+    CÓPIA do estado da câmera. Não registra alerta, não troca referência e
+    não interfere no monitoramento real.
+    """
+    import copy
+    from app.models import change_detector as cdm
+    from app.models import statue_compare
+    from app.services import damage_sim
+
+    if cenario not in damage_sim.SCENARIOS:
+        raise HTTPException(status_code=400, detail=f"Cenário inválido: {cenario}")
+    state = change_detector.monitored.get(camera_code)
+    if not state or "reference_frame" not in state:
+        raise HTTPException(status_code=409, detail="Esta câmera ainda não tem referência da estátua. "
+                                                    "Aguarde o monitoramento criar (com a estátua livre) e tente de novo.")
+    frame = await _fresh_frame(camera_code)
+    if frame is None:
+        raise HTTPException(status_code=503, detail="Não foi possível capturar a imagem atual da câmera")
+
+    def run():
+        ref_gray = state["reference_gray"]
+        h, w = ref_gray.shape[:2]
+        cur = cv2.resize(frame, (w, h)) if frame.shape[:2] != (h, w) else frame
+        M, info = statue_compare.align(ref_gray, cv2.cvtColor(cur, cv2.COLOR_RGB2GRAY), state["area"])
+        if M is None:
+            return {"error": f"Não foi possível alinhar com a referência ({info.get('reason')})"}
+        aligned = cv2.warpAffine(cur, M, (w, h))
+        cfg = zone_service.get_statue(camera_code)
+        sens = cfg.get("sensitive")
+        sens_px = (int(sens["x_start"] * w), int(sens["y_start"] * h), int(sens["x_end"] * w),
+                   int(sens["y_end"] * h)) if sens else None
+        damaged = damage_sim.apply(aligned, state["silhouette"], cenario, sens_px)
+
+        def measure(img):
+            sim = cdm.ChangeDetector()
+            st = copy.deepcopy(state)
+            st["streak"] = []
+            learning = st.get("learn_n", 0) < cdm.LEARN_CHECKS
+            st["learn_n"] = cdm.LEARN_CHECKS  # mede direto, sem a fase de aprendizado
+            st["reference_time"] = time.time()  # não renova a referência na cópia
+            sim.monitored[camera_code] = st
+            objs = detection_service.yolo_detector.detect(img, camera_code=camera_code, draw=False)["objects"]
+            ign = [d["bbox"] for d in objs if d["class_name"] in TRANSIENT_CLASSES and not d.get("is_statue")]
+            r = sim.check(camera_code, img, None, ignore_boxes=ign)
+            r["still_learning"] = learning
+            return r
+
+        return {"sem_dano": measure(aligned), "com_dano": measure(damaged)}
+
+    res = await run_in_threadpool(run)
+    if "error" in res:
+        raise HTTPException(status_code=422, detail=res["error"])
+    a, b = res["sem_dano"], res["com_dano"]
+    if not b.get("success"):
+        raise HTTPException(status_code=422, detail=b.get("error") or "Comparação não pôde ser feita agora")
+    level = b["ssim_alert_level"]
+    would_alert = cdm._LEVEL_RANK.get(level, 0) >= cdm._LEVEL_RANK["ALTO"]
+    before = a.get("change_percentage") if a.get("success") else None
+    return {
+        "success": True,
+        "camera_code": camera_code,
+        "cenario": cenario,
+        "cenario_label": damage_sim.SCENARIOS[cenario],
+        "sem_dano_pct": before,
+        "com_dano_pct": b["change_percentage"],
+        "increase_pct": b["confirmation"]["increase_pct"],
+        "level": level,
+        "would_alert": would_alert,
+        "still_learning": b.get("still_learning"),
+        "verdict": (f"DETECTADO: {damage_sim.SCENARIOS[cenario]} gera nível {level} "
+                    f"({b['change_percentage']:.1f}% da estátua alterada). Em operação, o alerta sai quando a "
+                    f"alteração se mantém por {cdm.SSIM_CONFIRM_CHECKS} comparações seguidas "
+                    f"(≥{int(cdm.SSIM_CONFIRM_SECONDS // 60)} min)." if would_alert else
+                    f"NÃO detectado como alerta: {damage_sim.SCENARIOS[cenario]} deu nível {level} "
+                    f"({b['change_percentage']:.1f}% alterada) — abaixo do limite de ALTO."),
+        "reference_roi_base64": b.get("reference_roi_base64"),
+        "current_roi_base64": b.get("current_roi_base64"),
+        "highlight_image_base64": b.get("highlight_image_base64"),
+        "compared_area": b.get("compared_area"),
+    }
+
+
 class AiPrintInput(BaseModel):
     # Imagem anotada que o operador está vendo (print + IA). Vazio = usa o
     # último frame analisado da câmera (vídeo contínuo)

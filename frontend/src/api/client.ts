@@ -172,6 +172,15 @@ class ApiClient {
     return data as { success: boolean; path: string; url: string }
   }
 
+  // Teste: aplica um dano simulado na estátua (imagem atual) e mede se seria detectado
+  async simulateDamage(cameraCode: string, cenario: string) {
+    const { data } = await this.http.post(`/api/monitor/simulate/${cameraCode}`, null, {
+      params: { cenario },
+      timeout: 120000,
+    })
+    return data
+  }
+
   async getZoneFrame(cameraCode: string) {
     const { data } = await this.http.get(`/api/monitor/zone/${cameraCode}/frame`, {
       // Captura pode levar até ~60s (2 tentativas do Playwright)

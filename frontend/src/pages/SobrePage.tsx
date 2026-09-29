@@ -50,7 +50,7 @@ export default function SobrePage() {
         <div className="flex items-center gap-4 mb-4">
           <span className="text-5xl">🏛️</span>
           <div>
-            <h1 className="text-2xl font-bold">Visão Patrimônios v2.0</h1>
+            <h1 className="text-2xl font-bold">Visão Patrimônios v3.0</h1>
             <p className="text-blue-200 text-sm">
               Sistema de Visão Computacional para Monitoramento de Patrimônios Públicos
             </p>
