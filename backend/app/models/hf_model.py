@@ -31,7 +31,9 @@ class HuggingFaceVandalismModel:
     Modelo CNN-Transformer Híbrido (ResNet18 + Transformer)
     que classifica vídeos em: normal, burglary, vandalism.
 
-    Pode ser usado como SLM para inferência rápida.
+    Classificador de VÍDEO de conjunto fechado: sempre distribui 100% entre
+    as 3 classes, mesmo para o que não é cena de câmera — por isso a rota
+    passa antes pelo porteiro de domínio (models/scene_gate.py).
     """
 
     def __init__(self):
@@ -137,7 +139,10 @@ class HuggingFaceVandalismModel:
 
     def predict_image(self, image: np.ndarray) -> dict:
         """
-        Para imagem estática, simula classificação tratando como vídeo de 1 frame.
+        Para imagem estática, simula classificação tratando como vídeo de 1 frame
+        repetido 16x. Sem movimento entre frames o modelo fica fora do que
+        aprendeu (tende a ~60% numa classe anormal em qualquer imagem) —
+        resultado só indicativo.
 
         Args:
             image: Imagem numpy array (RGB)

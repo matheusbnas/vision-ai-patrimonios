@@ -71,7 +71,7 @@ Plataforma web (FastAPI + React) que acompanha monumentos da cidade pelas câmer
 | **Patrimônios** | Patrimônios monitorados, suas câmeras fixas e o vídeo de cada uma |
 | **Mapa** | Patrimônios, raio de vigilância e câmeras do perímetro (ver acima) |
 | **Monitoramento** | Grade de câmeras com vídeo ao vivo ou print + IA, alertas, comparação com referência, calibração de zona/contorno e selo de data/hora |
-| **Antivandalismo** | Classificação de imagens com os modelos Hugging Face |
+| **Antivandalismo** | Classificação de imagem/vídeo (normal, roubo, vandalismo) com o modelo Hugging Face. Antes, uma verificação de cena (`models/scene_gate.py`) recusa gráficos, documentos, prints de tela, desenhos e cenas sem pessoas, pois o modelo sempre responde uma das 3 classes, mesmo para o que não é cena de câmera. Imagem parada tem confiabilidade **baixa**; vídeo com movimento, **média** |
 | **Sobre** | Informações do sistema |
 
 O **sino de alertas** no header toca um som, mostra um contador e lista os alertas novos; clicar leva ao Monitoramento. O som pode ser silenciado e a preferência fica salva.

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Sidebar from './components/Sidebar'
 import Header from './components/Header'
+import ErrorBoundary from './components/ErrorBoundary'
 import DashboardPage from './pages/DashboardPage'
 import PatrimoniosPage from './pages/PatrimoniosPage'
 import MapaPage from './pages/MapaPage'
@@ -97,7 +98,7 @@ export default function App() {
           onOpenMonitoramento={() => setCurrentPage('monitoramento')}
         />
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">
-          {renderPage()}
+          <ErrorBoundary resetKey={currentPage}>{renderPage()}</ErrorBoundary>
         </main>
       </div>
     </div>
