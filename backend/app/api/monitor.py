@@ -23,6 +23,7 @@ from app.services.detection_service import DetectionService
 from app.services import zone_service, alert_service
 from app.models.change_detector import ChangeDetector, covered_fraction
 from app.config import IMAGES_DIR, TRANSIENT_CLASSES
+from pydantic import BaseModel
 from app.schemas.schemas import ZoneInput, StatueInput
 
 logger = logging.getLogger(__name__)
@@ -1000,6 +1001,7 @@ async def detect_changes(
         "change_percentage": result["change_percentage"],
         "change_regions": result["change_regions"],
         "significant_changes": result["significant_changes"],
+        "visible_percentage": result.get("visible_percentage"),
         "ssim_alert_level": result["ssim_alert_level"],
         "confirmation": result["confirmation"],
         "hf_prediction": result["hf_prediction"],
@@ -1143,6 +1145,42 @@ async def live_capture_frame(camera_code: str):
     return Response(content=buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+class AiPrintInput(BaseModel):
+    # Imagem anotada que o operador está vendo (print + IA). Vazio = usa o
+    # último frame analisado da câmera (vídeo contínuo)
+    image_base64: Optional[str] = None
+
+
+@router.post("/save-ai-print/{camera_code}")
+async def save_ai_print(camera_code: str, payload: AiPrintInput):
+    """
+    Salva a imagem da câmera COM as marcações da IA (caixas, classe e
+    confiança de cada detecção, estátua, zona) em assets/images/<código>/,
+    com data e hora no nome — pra registro/evidência do monitoramento.
+    """
+    jpg = None
+    if payload.image_base64:
+        try:
+            jpg = base64.b64decode(payload.image_base64.split(",")[-1])
+        except Exception:
+            raise HTTPException(status_code=400, detail="Imagem inválida")
+    else:
+        from app.services import live_analysis
+        jpg = live_analysis.latest_jpeg(camera_code, max_age=30)
+    if not jpg:
+        raise HTTPException(status_code=404, detail="Sem imagem analisada pela IA para esta câmera")
+    frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Imagem inválida")
+    camera = camera_service.get_camera_by_code(camera_code) if camera_service else None
+    camera_name = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
+    path = save_camera_snapshot(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), camera_code, camera_name, "print_ia")
+    if not path:
+        raise HTTPException(status_code=500, detail="Não foi possível salvar a imagem")
+    return {"success": True, "camera_code": camera_code, "path": path,
+            "url": "/" + path.replace("\\", "/").split("backend/", 1)[-1]}
+
+
 @router.get("/statue/{camera_code}")
 async def get_statue(camera_code: str):
     """Contorno da estátua + área sensível da câmera (null = não calibrado)."""
@@ -1162,45 +1200,73 @@ async def set_statue(camera_code: str, payload: StatueInput):
     # A referência do SSIM foi recortada pela área antiga — descarta pra
     # ser recriada com o contorno novo no próximo ciclo.
     change_detector.monitored.pop(camera_code, None)
-    return {"success": True, "camera_code": camera_code, **entry}
+
+    # O que está dentro do contorno É o monumento: grava a aparência da
+    # estátua a partir da MESMA imagem em que o operador desenhou (a da
+    # calibração); sem ela, captura uma atual. O YOLO não tem classe
+    # "estátua" — sem isso a figura de bronze sai como "pessoa".
+    from app.services import statue_memory
+    cached = _calibration_frames.get(camera_code)
+    frame = cached[1] if cached and time.time() - cached[0] <= CALIBRATION_FRAME_MAX_AGE else None
+    if frame is None:
+        frame = await _fresh_frame(camera_code)
+    memory = statue_memory.save(camera_code, frame, payload.statue.model_dump()) if frame is not None         else {"saved": False, "reason": "não foi possível capturar a câmera"}
+    return {"success": True, "camera_code": camera_code, **entry, "statue_appearance": memory}
 
 
 @router.delete("/statue/{camera_code}")
 async def reset_statue(camera_code: str):
+    from app.services import statue_memory
     change_detector.monitored.pop(camera_code, None)
+    statue_memory.clear(camera_code)
     return {"success": True, "camera_code": camera_code, **zone_service.reset_statue(camera_code)}
+
+
+# Frame mostrado na calibração (código → (ts, frame RGB)). Ao salvar o
+# contorno da estátua, a aparência é gravada a partir DESTA imagem — a
+# mesma em que o operador desenhou.
+_calibration_frames: dict[str, tuple[float, np.ndarray]] = {}
+CALIBRATION_FRAME_MAX_AGE = 1800
+
+
+async def _fresh_frame(camera_code: str) -> Optional[np.ndarray]:
+    """Captura AGORA (sem cache); None se a câmera não responder."""
+    camera = camera_service.get_camera_by_code(camera_code)
+    if not camera:
+        return None
+    stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
+    if not stream_url:
+        return None
+    try:
+        return await run_in_threadpool(get_frame, stream_url, camera_code, 15.0, 0)
+    except Exception:
+        return None
 
 
 @router.get("/zone/{camera_code}/frame")
 async def get_zone_frame(camera_code: str):
     """
-    Captura um frame real da câmera (sem anotação) para servir de base
-    ao desenho do quadrante na ferramenta de calibração do frontend.
+    Frame ATUAL da câmera (captura nova, sem cache e sem imagem de
+    demonstração) para desenhar a calibração. Se a câmera não responder,
+    devolve erro — calibrar em cima de imagem antiga ou sintética deixaria
+    o contorno no lugar errado.
     """
     if not camera_service:
         raise HTTPException(status_code=500, detail="Serviço não inicializado")
 
-    frame = None
-    camera = camera_service.get_camera_by_code(camera_code)
-    if camera:
-        stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
-        if stream_url:
-            try:
-                frame = await run_in_threadpool(get_frame, stream_url, camera_code)
-            except Exception:
-                pass
-
-    frame_real = frame is not None
+    frame = await _fresh_frame(camera_code)
     if frame is None:
-        logger.warning(f"Não foi possível capturar frame da câmera {camera_code} para calibração, usando demo")
-        frame = _create_monument_frame()
+        raise HTTPException(status_code=503, detail="Não foi possível capturar a imagem atual da câmera. Tente novamente.")
+    captured_at = time.time()
+    _calibration_frames[camera_code] = (captured_at, frame)
 
     _, buffer = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
                              [cv2.IMWRITE_JPEG_QUALITY, 90])
     return {
         "success": True,
         "camera_code": camera_code,
-        "frame_captured": frame_real,
+        "frame_captured": True,
+        "captured_at": captured_at,
         "image_base64": base64.b64encode(buffer).decode("utf-8"),
     }
 

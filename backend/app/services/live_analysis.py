@@ -59,7 +59,7 @@ from app.config import (
 )
 from app.models.detector import PatrimonyDetector, _zone_box, _frac_box
 from app.models.surface_monitor import SurfaceMonitor
-from app.services import alert_service, evidence_service, live_capture, zone_service
+from app.services import alert_service, evidence_service, live_capture, statue_memory, zone_service
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +221,13 @@ class CameraAnalysis:
         # O detector consulta statue_check() pra cada caixa "pessoa"
         self.statue_refs: dict[int, dict] = {}
         self.statue_status: str = "aprendendo (precisa ficar visivel e parada)"
+        self.calib_version = 0
         # Superfície alterada sem ninguém por perto desde (ts) — confirmação
-        self.clear_since: Optional[float] = None
+        # Segundos SOMADOS em que a alteração seguiu visível com a estátua
+        # livre (ninguém ao alcance). Somado, não seguido: em monumento
+        # movimentado quase nunca há 1 min inteiro sem ninguém junto.
+        self.clear_accum = 0.0
+        self.prev_eval_ts: Optional[float] = None
         self.below_since: Optional[float] = None  # alteração abaixo do limite desde (ts)
         # Situação da superfície pra sobreposição/painel (texto explicativo)
         self.surface_status: str = ""
@@ -270,8 +275,20 @@ class CameraAnalysis:
         lugar da estátua igual à aparência aprendida. Alguém parado na frente
         da estátua tem a mesma caixa, mas outra imagem → é pessoa."""
         now = time.time()
+        # Estátua calibrada: compara a caixa com a mesma região da imagem
+        # da calibração (statue_memory) — vale sobre o aprendizado automático
+        if "calib" in self.statue_refs:
+            sim = statue_memory.similarity(self.code, bbox, image)
+            if sim is None:
+                return False
+            ok = sim >= statue_memory.MATCH_NCC
+            self.statue_status = (f"calibrada - reconhecida (semelhanca {sim:.2f})" if ok else
+                                  f"calibrada - pessoa na frente da estatua (semelhanca {sim:.2f})")
+            if ok:
+                self.statue_refs["calib"]["seen"] = now
+            return ok
         for ref in self.statue_refs.values():
-            if _iou(bbox, ref["bbox"]) < STATUE_MATCH_IOU:
+            if _iou(bbox, ref["bbox"]) < ref.get("iou_min", STATUE_MATCH_IOU):
                 continue
             cur = _statue_tpl(image, ref["bbox"])
             ncc = float((cur * ref["tpl"]).mean())
@@ -284,6 +301,25 @@ class CameraAnalysis:
                 return True
             self.statue_status = f"encoberta por pessoa na frente (semelhanca {ncc:.2f})"
         return False
+
+    def sync_calibration(self, frame: np.ndarray) -> None:
+        """Aparência da estátua gravada na calibração vira referência fixa
+        (não precisa esperar a estátua ficar 45 s parada pra reconhecer)."""
+        m = statue_memory.get(self.code)
+        if not m:
+            if self.statue_refs.pop("calib", None) is not None:
+                self.calib_version = 0
+            return
+        if m["version"] == self.calib_version and "calib" in self.statue_refs:
+            return
+        h, w = frame.shape[:2]
+        b = m["box"]
+        self.statue_refs["calib"] = {
+            "bbox": [int(b["x_start"] * w), int(b["y_start"] * h), int(b["x_end"] * w), int(b["y_end"] * h)],
+            "seen": time.time(), "ncc": 1.0, "calibrated": True,
+        }
+        self.calib_version = m["version"]
+        self.statue_status = "calibrada (aparencia gravada na calibracao)"
 
     def update_tracks(self, objects: list[dict], ts: float, frame_w: int,
                       surface_px: Optional[tuple] = None, frame: Optional[np.ndarray] = None) -> list[dict]:
@@ -339,7 +375,8 @@ class CameraAnalysis:
             del self.tracks[tid]
             self.statue_ids.discard(tid)
         now = time.time()
-        for key in [k for k, r in self.statue_refs.items() if now - r["seen"] > STATUE_REF_TTL]:
+        for key in [k for k, r in self.statue_refs.items()
+                    if not r.get("calibrated") and now - r["seen"] > STATUE_REF_TTL]:
             del self.statue_refs[key]
             logger.info(f"[análise {self.code}] referência da estátua #{key} expirada — reaprendendo")
         for tid in [k for k, v in self.recent_suspects.items() if ts - v > SURFACE_SUSPECT_MEMORY_SECONDS]:
@@ -480,6 +517,7 @@ class LiveAnalyzer:
 
     def _analyze(self, cam: CameraAnalysis, frame: np.ndarray, ts: float, monitor_api):
         t0 = time.time()
+        cam.sync_calibration(frame)
         # Com a estátua já reconhecida, o detector recebe as caixas de
         # referência dela (ver detector: caixa que cresceu = turista fundido)
         r = cam.detector.detect(frame, camera_code=cam.code, track=True, draw=False,
@@ -599,16 +637,20 @@ class LiveAnalyzer:
             # "some" se ficar abaixo do limite por SURFACE_CHANGE_GAP_SECONDS
             cam.below_since = cam.below_since or ts
             if cam.change_since is None or ts - cam.below_since >= SURFACE_CHANGE_GAP_SECONDS:
-                cam.change_since = cam.clear_since = None
+                cam.change_since = None
+                cam.clear_accum = 0.0
                 cam.surface_status = f"Estatua sem alteracao ({pct}%)"
             return None
         cam.below_since = None
+        # Tempo desde a última avaliação (limitado: lacuna grande não conta)
+        dt = min(ts - cam.prev_eval_ts, 5.0) if cam.prev_eval_ts else 0.0
+        cam.prev_eval_ts = ts
 
         cam.change_since = cam.change_since or ts
         sustained = ts - cam.change_since
-        suspects = sorted(cam.recent_suspects)
+        # A própria estátua (quando um frame ruim a fez parecer pessoa) não conta
+        suspects = sorted(i for i in cam.recent_suspects if i not in cam.statue_ids and i not in cam.statue_refs)
         if not suspects:
-            cam.clear_since = None
             if sustained >= SURFACE_UNATTRIBUTED_ABSORB_SECONDS:
                 # Mudou sem ninguém junto (luz, objeto deixado, câmera mexeu):
                 # vira fundo — não dispara quando alguém chegar depois
@@ -621,16 +663,15 @@ class LiveAnalyzer:
         # Alguém ao alcance da estátua agora: a "alteração" pode ser a própria
         # pessoa/sombra — espera ela se afastar pra ver se a mudança fica
         if near:
-            cam.clear_since = None
             cam.surface_status = (f"Alteracao {pct}% ha {sustained:.0f}s com pessoas junto - "
                                   f"aguardando a estatua ficar livre")
             return None
 
-        cam.clear_since = cam.clear_since or ts
-        clear_for = ts - cam.clear_since
+        cam.clear_accum += dt
+        clear_for = cam.clear_accum
         if clear_for < SURFACE_CLEAR_CONFIRM_SECONDS or sustained < SURFACE_CHANGE_CONFIRM_SECONDS:
             cam.surface_status = (f"Alteracao {pct}% ha {sustained:.0f}/{SURFACE_CHANGE_CONFIRM_SECONDS:.0f}s, "
-                                  f"estatua livre ha {clear_for:.0f}/{SURFACE_CLEAR_CONFIRM_SECONDS:.0f}s - verificando")
+                                  f"vista com a estatua livre por {clear_for:.0f}/{SURFACE_CLEAR_CONFIRM_SECONDS:.0f}s (somado) - verificando")
             return None
         if cam.pending or ts < cam.cooldown_until:
             cam.surface_status = f"Alteracao {pct}% - alerta ja registrado"
@@ -642,7 +683,7 @@ class LiveAnalyzer:
         alert = {
             "level": level,
             "message": (f"🎨 {level}: Estátua alterada ({pct}% da figura) e a alteração CONTINUOU depois que "
-                        f"as pessoas se afastaram ({int(clear_for)}s com a estátua livre). Pessoa(s) {ids} "
+                        f"as pessoas se afastaram ({int(clear_for)}s com a estátua livre, somados). Pessoa(s) {ids} "
                         f"estiveram junto antes. Possível pichação/dano — requer validação humana"),
         }
         cam.confirm = {"alert": alert, "pct": pct, "suspects": suspects, "ids": ids}
@@ -694,7 +735,8 @@ class LiveAnalyzer:
 
             evidence_service.finish_event(p["meta"], jpg, frames, on_done=_done)
             cam.surface.absorb()  # a mudança já virou evento: passa a ser o novo normal
-            cam.change_since = cam.clear_since = None
+            cam.change_since = None
+            cam.clear_accum = 0.0
 
 
 # ─── Registro global ─────────────────────────────────────────────

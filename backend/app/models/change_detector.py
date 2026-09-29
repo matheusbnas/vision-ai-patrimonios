@@ -189,8 +189,8 @@ class ChangeDetector:
         gray_ref = cv2.GaussianBlur(gray_ref, (3, 3), 0)
         gray_cur = cv2.GaussianBlur(gray_cur, (3, 3), 0)
 
-        score, diff_mask = ssim(gray_ref, gray_cur, full=True, data_range=255)
-        diff_mask = (1 - diff_mask).astype(np.uint8) * 255
+        score, ssim_map = ssim(gray_ref, gray_cur, full=True, data_range=255)
+        diff_mask = (1 - ssim_map).astype(np.uint8) * 255
 
         _, thresh = cv2.threshold(diff_mask, 40, 255, cv2.THRESH_BINARY)  # threshold mais alto
         kernel = np.ones((5, 5), np.uint8)
@@ -202,6 +202,7 @@ class ChangeDetector:
         # não é dano/pichação — apaga essas regiões do mapa de diff antes
         # de contar % alterado e regiões, e conta separadamente.
         ignored_count = 0
+        visible = np.ones(thresh.shape[:2], bool)   # parte da estátua sem ninguém na frente
         if ignore_boxes:
             for (px1, py1, px2, py2) in ignore_boxes:
                 ix1, iy1 = max(px1, zx1), max(py1, zy1)
@@ -214,12 +215,21 @@ class ChangeDetector:
                 rx2 = int((ix2 - zx1) * scale_x)
                 ry2 = int((iy2 - zy1) * scale_y)
                 cv2.rectangle(thresh, (rx1, ry1), (rx2, ry2), 0, -1)
+                visible[max(ry1, 0):max(ry2, 0), max(rx1, 0):max(rx2, 0)] = False
 
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        # Tudo medido só na área CALIBRADA da estátua (o recorte comparado é
+        # o contorno) e só na parte VISÍVEL dela (sem pessoas/veículos na
+        # frente) — pessoa na frente não é mudança na estátua.
         total_pixels = thresh.shape[0] * thresh.shape[1]
+        visible_pixels = max(int(visible.sum()), 1)
+        visible_pct = visible_pixels / total_pixels * 100
         changed_pixels = int(np.sum(thresh > 0))
-        change_pct = (changed_pixels / total_pixels) * 100
+        change_pct = (changed_pixels / visible_pixels) * 100
+        # Semelhança com a referência na parte visível (a média do SSIM
+        # inteiro caía com gente/sombra na frente, sem nada ter mudado)
+        score = float(ssim_map[visible].mean())
 
         # Regiões de mudança significativa (área mínima maior para filtrar ruído)
         changes = []
@@ -382,6 +392,8 @@ class ChangeDetector:
             "timestamp": timestamp,
             "similarity_score": round(float(score), 4),
             "change_percentage": round(change_pct, 2),
+            # % da área calibrada da estátua visível nesta comparação
+            "visible_percentage": round(visible_pct, 1),
             "change_regions": len(changes),
             "significant_changes": changes[:10],
             "ssim_alert_level": ssim_alert_level,

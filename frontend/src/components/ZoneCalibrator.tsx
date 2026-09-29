@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { X, Target, RotateCcw, Save, Trash2 } from 'lucide-react'
+import { X, Target, RotateCcw, Save, Trash2, RefreshCw } from 'lucide-react'
+import { formatTime } from './LiveClock'
 import { api, type ZoneRect } from '../api/client'
 
 type Zone = ZoneRect
@@ -28,7 +29,7 @@ const LAYERS: { id: Layer; label: string; color: string; handle: string; hint: s
     label: 'Estátua',
     color: 'border-cyan-400 bg-cyan-400/10',
     handle: 'bg-cyan-400',
-    hint: 'Contorno JUSTO da figura da estátua (inclua o pedestal só se for baixo). Objetos só alertam se encostarem aqui; pessoas em cima da estátua são detectadas por este contorno.',
+    hint: 'Contorno JUSTO da figura da estátua (sem o banco). Ao salvar, a imagem atual deste contorno vira a aparência do monumento: o YOLO não tem a classe "estátua" e marca a figura como pessoa. A partir daí, o que bater com esta aparência é tratado como monumento, e quem estiver na frente continua sendo pessoa. Calibre com a estátua livre, sem ninguém na frente.',
   },
   {
     id: 'sensitive',
@@ -72,6 +73,8 @@ export default function ZoneCalibrator({
   onClose: () => void
 }) {
   const [imageBase64, setImageBase64] = useState<string | null>(null)
+  const [capturedAt, setCapturedAt] = useState<number | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
   const [rects, setRects] = useState<Record<Layer, Zone | null>>({ zone: null, statue: null, sensitive: null })
   const [active, setActive] = useState<Layer>('statue')
   const [isCustom, setIsCustom] = useState(false)
@@ -86,21 +89,39 @@ export default function ZoneCalibrator({
     setLoading(true)
     setError(null)
     try {
-      const [frameData, zoneData, statueData] = await Promise.all([
-        api.getZoneFrame(cameraCode),
+      const [zoneData, statueData] = await Promise.all([
         api.getZone(cameraCode),
         api.getStatue(cameraCode),
       ])
-      if (frameData.success) setImageBase64(frameData.image_base64)
       setRects({ zone: zoneData.zone, statue: statueData.statue, sensitive: statueData.sensitive })
       setIsCustom(zoneData.is_custom)
+      await refreshFrame()
     } catch (err) {
       console.error(err)
-      setError('Não foi possível carregar o frame da câmera.')
+      setError('Não foi possível carregar a calibração da câmera.')
     } finally {
       setLoading(false)
     }
   }, [cameraCode])
+
+  // Sempre a imagem ATUAL da câmera (captura nova no servidor, sem cache)
+  async function refreshFrame() {
+    setRefreshing(true)
+    setError(null)
+    try {
+      const frameData = await api.getZoneFrame(cameraCode)
+      if (frameData.success) {
+        setImageBase64(frameData.image_base64)
+        setCapturedAt((frameData.captured_at ?? Date.now() / 1000) * 1000)
+      }
+    } catch (err: any) {
+      setImageBase64(null)
+      setCapturedAt(null)
+      setError(err?.response?.data?.detail || 'Não foi possível capturar a imagem atual da câmera.')
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   useEffect(() => {
     load()
@@ -273,6 +294,23 @@ export default function ZoneCalibrator({
           </div>
           <p className="text-xs text-gray-500">{activeLayer.hint} Arraste o retângulo ou as alças dos cantos.</p>
 
+          <div className="flex items-center justify-between text-[11px] text-gray-500">
+            <span>
+              {capturedAt
+                ? <>Imagem atual da câmera, capturada às <strong className="text-gray-700">{formatTime(capturedAt)}</strong></>
+                : 'Sem imagem da câmera'}
+            </span>
+            <button
+              onClick={refreshFrame}
+              disabled={refreshing || loading}
+              className="flex items-center gap-1 px-2 py-1 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-40"
+              title="Captura uma imagem nova da câmera agora"
+            >
+              <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} />
+              Atualizar imagem
+            </button>
+          </div>
+
           {loading ? (
             <div className="h-64 flex items-center justify-center text-gray-400 text-sm">
               Carregando frame da câmera...
@@ -340,7 +378,8 @@ export default function ZoneCalibrator({
               </button>
               <button
                 onClick={handleSave}
-                disabled={saving || loading || !rects.zone}
+                disabled={saving || loading || refreshing || !rects.zone || !imageBase64}
+                title={!imageBase64 ? 'Capture a imagem atual da câmera antes de salvar' : undefined}
                 className="text-xs px-3 py-1.5 rounded-lg bg-cor-blue text-white hover:bg-cor-blue-light flex items-center gap-1.5 disabled:opacity-50"
               >
                 <Save size={12} />

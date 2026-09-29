@@ -98,6 +98,8 @@ interface DetectionFrame {
   // Novos campos do change detection (SSIM + HF)
   similarity_score?: number
   change_percentage?: number
+  // % da área calibrada da estátua visível (sem pessoas na frente) na comparação
+  visible_percentage?: number
   change_regions?: number
   significant_changes?: { bbox: number[]; area_percent: number }[]
   highlight_image_base64?: string
@@ -538,6 +540,7 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                 highlight_image_base64: data.highlight_image_base64,
                 similarity_score: data.similarity_score,
                 change_percentage: data.change_percentage,
+                visible_percentage: data.visible_percentage,
                 change_regions: data.change_regions,
                 ssim_alert_level: data.ssim_alert_level,
                 confirmation: data.confirmation,
@@ -565,6 +568,33 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
       intervalRef.current = setTimeout(runAutoScanLoop, 10000)
     }
   }, [scanAndCompare])
+
+  // Salvar a imagem COM as marcações da IA (registro/evidência): grava no
+  // servidor (assets/images/<câmera>/..._print_ia_<data>.jpg) e baixa uma cópia
+  const [aiSaving, setAiSaving] = useState<Record<string, boolean>>({})
+  const [aiSaved, setAiSaved] = useState<Record<string, string>>({})
+  const saveAiPrint = async (code: string) => {
+    setAiSaving((s) => ({ ...s, [code]: true }))
+    try {
+      const b64 = code in liveCams ? undefined : frames[code]?.image_base64
+      const r = await api.saveAiPrint(code, b64)
+      setAiSaved((s) => ({ ...s, [code]: r.path }))
+      // Cópia local: via blob (o atributo download é ignorado entre origens)
+      const blob = await (await fetch(api.assetUrl(r.url))).blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = r.path.split(/[\\/]/).pop() || `IA_${code}.jpg`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 5000)
+    } catch (err: any) {
+      window.alert(err?.response?.data?.detail || 'Não foi possível salvar a imagem da IA')
+    } finally {
+      setAiSaving((s) => ({ ...s, [code]: false }))
+    }
+  }
 
   const toggleAutoScan = () => {
     if (running) {
@@ -750,6 +780,7 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                         highlight_image_base64: data.highlight_image_base64,
                         similarity_score: data.similarity_score,
                         change_percentage: data.change_percentage,
+                visible_percentage: data.visible_percentage,
                         change_regions: data.change_regions,
                         significant_changes: data.significant_changes,
                         ssim_alert_level: data.ssim_alert_level,
@@ -854,6 +885,14 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                           title="Abre a URL real da Tixxi em uma nova aba do navegador"
                         >
                           🔗 Nova aba
+                        </button>
+                        <button
+                          onClick={() => saveAiPrint(code)}
+                          disabled={aiSaving[code] || !(code in liveCams || frame?.image_base64)}
+                          className="text-[10px] px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 disabled:opacity-50"
+                          title="Salva a imagem com as marcações da IA (pessoas, objetos e % de confiança) no servidor e baixa uma cópia"
+                        >
+                          {aiSaving[code] ? '⏳' : '💾'} Salvar IA
                         </button>
                         <button
                           onClick={() => handleSnapshot(code)}
@@ -1088,6 +1127,25 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                         </div>
                       )}
 
+                      {/* 💾 Print com IA salvo pelo operador */}
+                      {aiSaved[code] && (
+                        <div className="bg-emerald-50 rounded-lg p-2 flex items-center gap-2">
+                          <Camera size={14} className="text-emerald-500 shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[9px] font-medium text-emerald-700">💾 Print com IA salvo no servidor</p>
+                            <a
+                              href={api.assetUrl('/' + aiSaved[code].replace(/\\/g, '/'))}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[9px] text-emerald-700 hover:text-emerald-900 underline truncate block"
+                              title={aiSaved[code]}
+                            >
+                              {aiSaved[code].split(/[\\/]/).pop()}
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
                       {/* SSIM: Similaridade / Mudança */}
                       {frame?.similarity_score != null && (
                         <div className="bg-blue-50 rounded-lg p-2">
@@ -1096,7 +1154,7 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                               <p className="text-lg font-bold text-blue-700">
                                 {(frame.similarity_score * 100).toFixed(1)}%
                               </p>
-                              <p className="text-[8px] text-gray-500">Similaridade</p>
+                              <p className="text-[8px] text-gray-500" title="Quanto a estátua (só o contorno calibrado, sem as pessoas na frente) está igual à imagem de referência">Igual à referência</p>
                             </div>
                             <div>
                               <p className={`text-lg font-bold ${
@@ -1107,13 +1165,20 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                               }`}>
                                 {frame.change_percentage?.toFixed(1)}%
                               </p>
-                              <p className="text-[8px] text-gray-500">Alterado</p>
+                              <p className="text-[8px] text-gray-500" title="Parte visível da estátua (contorno calibrado) que mudou em relação à referência">Estátua alterada</p>
                             </div>
                             <div>
-                              <p className="text-lg font-bold text-gray-700">{frame.change_regions || 0}</p>
-                              <p className="text-[8px] text-gray-500">Regiões</p>
+                              <p className="text-lg font-bold text-gray-700">
+                                {frame.visible_percentage != null ? `${frame.visible_percentage.toFixed(0)}%` : (frame.change_regions || 0)}
+                              </p>
+                              <p className="text-[8px] text-gray-500" title="Quanto da estátua ficou visível nesta comparação (o resto estava encoberto por pessoas/veículos e não entra na conta)">
+                                {frame.visible_percentage != null ? 'Estátua visível' : 'Regiões'}
+                              </p>
                             </div>
                           </div>
+                          <p className="mt-1 text-[9px] text-gray-500 text-center">
+                            Comparação só dentro do contorno calibrado da estátua, sem as pessoas na frente
+                          </p>
                           {frame.confirmation && (
                             <p className="mt-1 text-[9px] text-gray-600 text-center">
                               {frame.confirmation.increase_pct >= 0.1

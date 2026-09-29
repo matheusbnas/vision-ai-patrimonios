@@ -163,6 +163,15 @@ class ApiClient {
     return data
   }
 
+  // Salva no servidor a imagem COM as marcações da IA (sem imagem = último
+  // frame analisado do vídeo contínuo)
+  async saveAiPrint(cameraCode: string, imageBase64?: string) {
+    const { data } = await this.http.post(`/api/monitor/save-ai-print/${cameraCode}`, {
+      image_base64: imageBase64 ?? null,
+    })
+    return data as { success: boolean; path: string; url: string }
+  }
+
   async getZoneFrame(cameraCode: string) {
     const { data } = await this.http.get(`/api/monitor/zone/${cameraCode}/frame`, {
       // Captura pode levar até ~60s (2 tentativas do Playwright)

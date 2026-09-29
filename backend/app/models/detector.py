@@ -29,7 +29,7 @@ from app.config import (
     STATUE_OBJECT_OVERLAP,
     INTERACTION_GRACE_SECONDS,
 )
-from app.services import zone_service, risk_tracker
+from app.services import zone_service, risk_tracker, statue_memory
 from app.models import interaction
 from app.models.interaction import shared_analyzer, _overlap_frac, is_statue_itself, PRINT_GRACE_SECONDS
 
@@ -177,8 +177,11 @@ class PatrimonyDetector:
                     elif statue_check is not None:
                         is_statue = statue_check(bbox, image)
                     else:
-                        is_statue = is_statue_itself(bbox, statue_px) or (
-                            track_id is not None and track_id in (statue_track_ids or ()))
+                        # Aparência gravada na calibração, se houver; senão geometria
+                        by_look = statue_memory.is_statue(camera_code, bbox, image)
+                        is_statue = by_look if by_look is not None else (
+                            is_statue_itself(bbox, statue_px)
+                            or (track_id is not None and track_id in (statue_track_ids or ())))
 
                     detection = {
                         "class_id": class_id,
@@ -201,11 +204,18 @@ class PatrimonyDetector:
             annotated_image = image.copy()
             if draw:
                 s = max(w / 1280, 0.4)
+                # Zona/contornos primeiro: as etiquetas das detecções ficam por cima
+                zx1, zy1, zx2, zy2 = zone
+                cv2.rectangle(annotated_image, (zx1, zy1), (zx2, zy2), (0, 255, 255), 1)
+                if statue_px:
+                    cv2.rectangle(annotated_image, statue_px[:2], statue_px[2:], (0, 200, 255), 2)
+                if sensitive_px:
+                    cv2.rectangle(annotated_image, sensitive_px[:2], sensitive_px[2:], (255, 0, 255), 2)
                 for d in detections:
                     x1, y1, x2, y2 = d["bbox"]
                     conf_txt = f"{d['confidence'] * 100:.0f}%"
                     if d["is_statue"]:
-                        color, text = (120, 170, 255), f"estatua (ignorada) {conf_txt}"
+                        color, text = (120, 170, 255), f"estatua (monumento) {conf_txt}"
                     elif d["class_name"] == "pessoa":
                         color, text = (255, 160, 0), f"pessoa {conf_txt}"
                     else:
@@ -318,13 +328,6 @@ class PatrimonyDetector:
                 interaction.clear(tracker_key, INTERACTION_GRACE_SECONDS if track else PRINT_GRACE_SECONDS)
 
         # ─── Desenha zona, contorno da estátua e objetos de risco ────────
-        zx1, zy1, zx2, zy2 = zone
-        if draw:
-            cv2.rectangle(annotated_image, (zx1, zy1), (zx2, zy2), (0, 255, 255), 1)
-            if statue_px:
-                cv2.rectangle(annotated_image, statue_px[:2], statue_px[2:], (0, 200, 255), 2)
-            if sensitive_px:
-                cv2.rectangle(annotated_image, sensitive_px[:2], sensitive_px[2:], (255, 0, 255), 2)
         for d in risk_objects if draw else []:
             rx1, ry1, rx2, ry2 = d["bbox"]
             cv2.rectangle(annotated_image, (rx1, ry1), (rx2, ry2), (255, 0, 0), 3)
