@@ -42,7 +42,7 @@ SSIM_PIXEL_DIFF = 0.45
 COLOR_PIXEL_DIFF = 28.0
 # Borda tirada da silhueta da estátua (fração da altura dela): o alinhamento
 # nunca é perfeito ao pixel e a borda contra o fundo viraria diferença
-SILHOUETTE_ERODE = 0.015
+SILHOUETTE_DILATE = 0.06
 # Folga em volta da silhueta de quem está na frente (cabelo, braço, sombra)
 PERSON_MASK_PAD = 0.04
 # Comparações seguidas sem conseguir alinhar → a câmera mudou de posição:
@@ -50,6 +50,20 @@ PERSON_MASK_PAD = 0.04
 REALIGN_RESET_CHECKS = 5
 # Menor mancha de alteração que conta (fração da silhueta visível)
 MIN_CHANGE_BLOB = 0.004
+# Silhueta no lugar da estátua só é a estátua se a imagem ali bater com a
+# referência (correlação); abaixo disso é pessoa parada na frente
+STATUE_SAME_NCC = 0.5
+# Pixel com brilho a partir disto (0-255) = reflexo do sol no bronze
+GLARE_LEVEL = 235
+# Referência renovada a cada X s enquanto tudo está normal e a estátua
+# está pelo menos Y visível (acompanha a luz do dia)
+REF_REFRESH_SECONDS = 1800
+REF_REFRESH_MIN_VISIBLE = 0.9
+# Fundo que se mexe: média móvel de "mudou" por pixel; acima do nível sai da conta
+DYNAMIC_RATE = 0.2
+DYNAMIC_LEVEL = 0.3
+# Comparações de aprendizado (sem alerta) logo após criar a referência
+LEARN_CHECKS = 4
 
 
 def _b64(img_rgb: np.ndarray) -> str:
@@ -176,10 +190,18 @@ class ChangeDetector:
             silhouette[area[1]:area[3], area[0]:area[2]] = True
             mode = "contorno calibrado"
         else:
-            # Tira a borda: alinhamento nunca é perfeito ao pixel, e a borda
-            # da figura contra o fundo viraria "diferença"
-            k = max(int((area[3] - area[1]) * SILHOUETTE_ERODE), 1)
-            silhouette = cv2.erode(silhouette.astype(np.uint8), np.ones((k, k), np.uint8)).astype(bool)
+            # A segmentação (treinada com gente, não com bronze) costuma
+            # perder mãos/pernas da estátua: dilata a silhueta e limita à
+            # caixa da estátua. O fundo que entrar junto (mar, guarda-sol) é
+            # aprendido como "fundo que se mexe" nas primeiras comparações
+            # (ver "dynamic" em check) e sai da conta.
+            bh = box[3] - box[1]
+            k = max(int(bh * SILHOUETTE_DILATE), 1)
+            silhouette = cv2.dilate(silhouette.astype(np.uint8), np.ones((k, k), np.uint8)).astype(bool)
+            px, py = int((box[2] - box[0]) * 0.03), int(bh * 0.03)
+            in_box = np.zeros_like(silhouette)
+            in_box[max(box[1] - py, 0):box[3] + py, max(box[0] - px, 0):box[2] + px] = True
+            silhouette &= in_box
             ys, xs = np.nonzero(silhouette)
             area = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
             mode = "silhueta da estátua"
@@ -209,6 +231,10 @@ class ChangeDetector:
             "streak": [],
             # comparações seguidas sem conseguir alinhar (câmera mudou de posição)
             "misaligned": 0,
+            # Por pixel da área: quanto ele costuma mudar em comparações
+            # normais (0-1). Alto = fundo que se mexe (mar, guarda-sol,
+            # areia vista pelas frestas) → fora da comparação
+            "dynamic": np.zeros((area[3] - area[1], area[2] - area[0]), np.float32),
         }
         logger.info(f"Referência definida para câmera {camera_code} ({mode})")
         return {
@@ -269,10 +295,16 @@ class ChangeDetector:
         # ─── 2. O que está na frente da estátua (não conta) ─────────
         front = np.zeros((h, w), np.uint8)
         pad = max(int((zy2 - zy1) * PERSON_MASK_PAD), 3)
+        warped_gray = cv2.cvtColor(warped, cv2.COLOR_RGB2GRAY)
         for box, mk in statue_compare.people_masks(current_frame):
             mk_ref = cv2.warpAffine(mk.astype(np.uint8), M, (w, h), flags=cv2.INTER_NEAREST) > 0
-            if statue_compare.mask_iou(mk_ref, silhouette) >= 0.6:
-                continue  # é a própria estátua
+            # No lugar da estátua E com a imagem igual à da referência = a
+            # própria estátua. Pessoa parada bem na frente dela ocupa o mesmo
+            # lugar, mas a imagem é outra — é gente, sai da conta.
+            if (statue_compare.mask_iou(mk_ref, silhouette) >= 0.6
+                    and statue_compare.masked_ncc(ref_data["reference_gray"], warped_gray,
+                                                  silhouette & mk_ref) >= STATUE_SAME_NCC):
+                continue
             front |= cv2.dilate(mk_ref.astype(np.uint8), np.ones((pad, pad), np.uint8))
         # Caixas do YOLO (pessoas, veículos) também saem da conta, no
         # enquadramento da referência — só reduzem a área comparada
@@ -300,6 +332,15 @@ class ChangeDetector:
         # ─── 3. Diferença dentro da silhueta visível ─────────────────
         gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_RGB2GRAY)
         gray_cur = cv2.cvtColor(current_roi, cv2.COLOR_RGB2GRAY)
+        # Reflexo do sol no bronze (pixel estourado em qualquer uma das duas
+        # imagens) muda de lugar ao longo do dia: fica fora da comparação
+        glare = cv2.dilate(((gray_ref >= GLARE_LEVEL) | (gray_cur >= GLARE_LEVEL)).astype(np.uint8),
+                           np.ones((7, 7), np.uint8)).astype(bool)
+        visible = visible & ~glare
+        observed = visible.copy()  # sem o fundo aprendido — usado pra aprender
+        dynamic = ref_data.get("dynamic")
+        if dynamic is not None and dynamic.shape == visible.shape:
+            visible = visible & (dynamic < DYNAMIC_LEVEL)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray_ref = cv2.GaussianBlur(clahe.apply(gray_ref), (3, 3), 0)
         gray_cur = cv2.GaussianBlur(clahe.apply(gray_cur), (3, 3), 0)
@@ -313,7 +354,8 @@ class ChangeDetector:
         dlab = lab_cur - lab_ref
         dlab[..., 0] -= float(np.median(dlab[..., 0][visible])) if visible.any() else 0.0
         color_changed = np.sqrt((0.5 * dlab[..., 0]) ** 2 + dlab[..., 1] ** 2 + dlab[..., 2] ** 2) > COLOR_PIXEL_DIFF
-        changed = (struct_changed | color_changed) & visible
+        changed_any = struct_changed | color_changed
+        changed = changed_any & visible
         kernel = np.ones((5, 5), np.uint8)
         thresh = cv2.morphologyEx(changed.astype(np.uint8) * 255, cv2.MORPH_OPEN, kernel)
         thresh[~visible] = 0
@@ -370,6 +412,32 @@ class ChangeDetector:
         increase = max(change_pct - baseline, 0.0)
         ssim_alert_level = self._ssim_alert_level(increase)
 
+        # ─── Fundo que se mexe (mar, guarda-sol, areia pelas frestas) ──
+        # Fase de APRENDIZADO: as primeiras LEARN_CHECKS comparações depois
+        # da referência só observam quais pixels mudam — sem nível, sem
+        # alerta. Depois, continua aprendendo devagar só com a situação
+        # normal (dano persistente, ALTO+, nunca vira fundo).
+        learning = False
+        if dynamic is not None and dynamic.shape == observed.shape:
+            n = ref_data.get("learn_n", 0)
+            if n < LEARN_CHECKS:
+                learning = True
+                ref_data.setdefault("learn_chg", np.zeros_like(dynamic))
+                ref_data.setdefault("learn_obs", np.zeros_like(dynamic))
+                ref_data["learn_chg"][observed] += changed_any[observed]
+                ref_data["learn_obs"][observed] += 1
+                ref_data["learn_n"] = n + 1
+                if n + 1 == LEARN_CHECKS:
+                    obs = ref_data.pop("learn_obs")
+                    chg = ref_data.pop("learn_chg")
+                    # nunca visto sem gente na frente: sem como saber → fora
+                    dynamic[:] = np.where(obs > 0, chg / np.maximum(obs, 1), 1.0)
+                    logger.info(f"[{camera_code}] fundo aprendido: {(dynamic >= DYNAMIC_LEVEL).mean() * 100:.0f}% "
+                                f"da área sai da comparação")
+                ssim_alert_level, increase = "NORMAL", 0.0
+            elif _LEVEL_RANK[ssim_alert_level] < _LEVEL_RANK["ALTO"]:
+                dynamic[observed] = (1 - DYNAMIC_RATE) * dynamic[observed] + DYNAMIC_RATE * changed_any[observed]
+
         # ─── 3. Confirmação: o salto precisa se manter ─────────────
         # Gente sentada ao lado, sombra de guarda-sol, reflexo: somem no
         # print seguinte. Peça faltando ou tinta: continuam.
@@ -378,7 +446,7 @@ class ChangeDetector:
             streak.append((now, ssim_alert_level))
         else:
             streak.clear()
-            if ssim_alert_level == "NORMAL":
+            if ssim_alert_level == "NORMAL" and not learning:
                 baseline_hist.append(change_pct)
                 del baseline_hist[:-SSIM_BASELINE_WINDOW]
         confirmed = (len(streak) >= SSIM_CONFIRM_CHECKS
@@ -391,6 +459,8 @@ class ChangeDetector:
             "increase_pct": round(increase, 2),
             "checks": len(streak),
             "checks_needed": SSIM_CONFIRM_CHECKS,
+            "learning": learning,
+            "learn_progress": f"{ref_data.get('learn_n', LEARN_CHECKS)}/{LEARN_CHECKS}",
             "confirmed": confirmed,
         }
 
@@ -436,6 +506,19 @@ class ChangeDetector:
         if alert:
             baseline_hist[:] = [change_pct]
             streak.clear()
+
+        # Referência móvel: com tudo normal e a estátua inteira à vista, a
+        # referência é renovada com a imagem atual (já alinhada) — acompanha
+        # o sol mudando reflexo e sombra no bronze ao longo do dia. Nunca
+        # renova com alteração em andamento (o dano não vira "normal").
+        if (not alert and ssim_alert_level == "NORMAL" and not streak
+                and visible_frac >= REF_REFRESH_MIN_VISIBLE
+                and in_view[zy1:zy2, zx1:zx2].all()
+                and now - ref_data["reference_time"] >= REF_REFRESH_SECONDS):
+            ref_data.update(reference_frame=warped, reference_gray=cv2.cvtColor(warped, cv2.COLOR_RGB2GRAY),
+                            reference_image=current_roi.copy(), reference_time=now)
+            baseline_hist.clear()
+            logger.info(f"[{camera_code}] referência renovada (tudo normal, estátua livre)")
 
         # Atualiza estado
         self.monitored[camera_code]["last_check"] = time.time()
@@ -571,21 +654,10 @@ class ChangeDetector:
             # Sem mudança SSIM → NORMAL, mesmo que HF alerte
             return None, "NORMAL"
 
-        if has_ssim_change and has_hf_alert:
-            # Ambos confirmam: alerta combinado
-            hf_level = hf_alert["level"]
-            if ssim_level == "CRÍTICO" or hf_level == "CRÍTICO":
-                level = "CRÍTICO"
-            elif ssim_level == "ALTO" or hf_level == "ALTO":
-                level = "ALTO"
-            else:
-                level = "MODERADO"
-            msg = (f"🚨 {level}: Mudança física detectada no monumento "
-                   f"({change_pct:.1f}% alterado) + "
-                   f"HF confirma {', '.join(hf_alert['types'])}")
-            alert = {"level": level, "message": msg, "source": "ssim+hf"}
-            return alert, level
-
+        # O modelo HF NÃO decide nem sobe o nível: em imagem parada ele dá
+        # 60-86% "vandalismo" pra quase qualquer cena (foi treinado com vídeo)
+        # e transformava toda mudança pequena em CRÍTICO. O nível é só o da
+        # alteração medida na estátua.
         if has_ssim_change:
             # Só mudança física (sem confirmação HF)
             level = ssim_level

@@ -29,5 +29,11 @@
     "y_start": 0.0,
     "y_end": 0.483
   },
-  "_coord_space": "video"
+  "_coord_space": "video",
+  "000056": {
+    "x_start": 0.2517,
+    "x_end": 0.7608,
+    "y_start": 0.1974,
+    "y_end": 0.75
+  }
 }

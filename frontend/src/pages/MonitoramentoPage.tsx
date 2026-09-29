@@ -125,6 +125,8 @@ interface DetectionFrame {
     checks: number
     checks_needed: number
     confirmed: boolean
+    learning?: boolean
+    learn_progress?: string
   }
   // Alerta preditivo do YOLO (objeto de risco dentro do quadrante do monumento)
   risk_alert?: {
@@ -1226,7 +1228,9 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                           )}
                           {frame.confirmation && (
                             <p className="mt-1 text-[9px] text-gray-600 text-center">
-                              {frame.confirmation.increase_pct >= 0.1
+                              {frame.confirmation.learning
+                                ? `Aprendendo o fundo que se mexe em volta da estátua (${frame.confirmation.learn_progress}) — sem alertas nesta fase`
+                                : frame.confirmation.increase_pct >= 0.1
                                 ? `+${frame.confirmation.increase_pct.toFixed(1)} p.p. sobre o normal (${frame.confirmation.baseline_pct.toFixed(1)}%)`
                                 : `Dentro do normal da câmera (${frame.confirmation.baseline_pct.toFixed(1)}%)`}
                               {frame.confirmation.checks > 0 && !frame.confirmation.confirmed && (

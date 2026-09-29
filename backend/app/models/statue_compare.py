@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 SEG_CONF = 0.3
 # Casamento de pontos: mínimo de pontos consistentes pra confiar no alinhamento
-ALIGN_MIN_INLIERS = 15
+ALIGN_MIN_INLIERS = 60
 # Região usada pra alinhar = caixa da estátua ampliada (fração de cada lado)
 ALIGN_CONTEXT = 0.6
 # Deslocamento/zoom acima disto = a câmera mudou de posição (não é "tremida")
@@ -131,3 +131,15 @@ def align(ref_gray: np.ndarray, cur_gray: np.ndarray, box) -> tuple[Optional[np.
     if abs(scale - 1) > ALIGN_MAX_SCALE or shift > ALIGN_MAX_SHIFT:
         return None, {**info, "reason": "a câmera mudou o enquadramento"}
     return M, info
+
+
+def masked_ncc(a_gray: np.ndarray, b_gray: np.ndarray, mask: np.ndarray) -> float:
+    """Correlação normalizada (-1..1) entre duas imagens, só nos pixels da máscara.
+    ~1 = mesma imagem (mesmo com luz diferente); baixo = outra coisa no lugar."""
+    if mask.sum() < 50:
+        return 1.0
+    a = a_gray[mask].astype(np.float32)
+    b = b_gray[mask].astype(np.float32)
+    a = (a - a.mean()) / (a.std() + 1e-6)
+    b = (b - b.mean()) / (b.std() + 1e-6)
+    return float((a * b).mean())
