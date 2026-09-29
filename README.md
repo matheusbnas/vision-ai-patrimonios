@@ -103,11 +103,13 @@ Os critérios foram endurecidos porque monumentos turísticos (ex.: Drummond, em
 
 | Tipo | Antes | Agora |
 |---|---|---|
-| **Mudança física (SSIM, prints)** | > 3% alterado num único print já alertava | Nível pelo **aumento sobre o normal da câmera**, não pelo % bruto: +5 p.p. MODERADO, **+10 ALTO**, **+20 CRÍTICO**. O normal é a mediana das últimas comparações sem alteração, então sol e sombra mudando ao longo do dia não alertam. O salto precisa se repetir em **3 comparações seguidas em pelo menos 60 s**. Depois do alerta, o estado atual vira o novo normal e o mesmo dano não alerta de novo. |
-| **Mudança + interação** | Qualquer mudança > 3% até 10 min depois de qualquer toque na estátua virava **CRÍTICO** | Só escala para CRÍTICO com mudança **confirmada** e interação **confirmada** (pessoa em cima por 5 s, ou mão na área sensível por 30 s). |
-| **Superfície (vídeo contínuo)** | 1,5% alterado por 2 s com qualquer pessoa por perto → CRÍTICO | Só conta a alteração **longe de quem está na frente**: um halo em volta de cada pessoa descarta sombra, mochila e perna fora da caixa. Mínimo de **3%** por **4 s**; **ALTO** de 3% a 8%, **CRÍTICO** a partir de 8%. |
-| **Pessoa em cima da estátua** | Um tornozelo acima da base num frame → ALTO | **Os dois tornozelos** acima da base por **5 s** seguidos (tolera falhas de até 3 s na detecção). Antes disso é MODERADO, sem som. Um tornozelo só costuma ser perna cruzada de quem está sentado no banco. |
-| **Mão na área sensível** | MODERADO já tocava som | MODERADO fica só no histórico; notifica ao virar ALTO (30 s seguidos). |
+| **Mudança física (SSIM, prints)** | > 3% alterado num único print já alertava | Nível pelo **aumento sobre o normal da câmera**, não pelo % bruto: +5 p.p. MODERADO, **+10 ALTO**, **+20 CRÍTICO**. O normal é a mediana das últimas comparações sem alteração, então sol e sombra mudando ao longo do dia não alertam. O salto precisa se repetir em **4 comparações seguidas cobrindo pelo menos 5 min**. Depois do alerta, o estado atual vira o novo normal e o mesmo dano não alerta de novo. |
+| **Mudança + interação** | Qualquer mudança > 3% até 10 min depois de qualquer toque na estátua virava **CRÍTICO** | Só escala para CRÍTICO com mudança **confirmada** e interação **confirmada** (a mesma pessoa em pé em cima por 20 s, ou com a mão na área sensível por 90 s). |
+| **Superfície (vídeo contínuo)** | 1,5% alterado por 2 s com qualquer pessoa por perto → CRÍTICO | Procura mudança na **estrutura física da estátua**, algo que fica. Todas estas condições precisam valer juntas: (1) a superfície é **a figura da estátua**, não o banco; (2) a alteração fica **longe de quem está na frente** (um halo descarta sombra, mochila e perna); (3) a alteração está **parada** (sem movimento) por 15 s, o que descarta vendedor não detectado e falha de transmissão; (4) está presente há **3 min** (quedas de até 20 s não zeram); (5) **continua com a estátua livre** (ninguém ao alcance) por **1 min**; (6) alguém esteve junto antes. Frames com falha de transmissão pausam a análise. **ALTO** de 3% a 8% da figura, **CRÍTICO** a partir de 8%. Depois de um alerta, a câmera fica 30 min sem outro. |
+| **Quem é a estátua** | Qualquer caixa "pessoa" no lugar do contorno era tratada como a estátua, e o turista parado na frente ficava invisível | A estátua é aprendida quando fica **45 s parada** e a sua **aparência** (imagem) é guardada. Uma caixa só é tratada como estátua se a imagem bater com essa aparência; quem está na frente dela volta a contar como pessoa. |
+| **Pessoa em cima da estátua** | Um tornozelo acima da base num frame → ALTO; somava o tempo de turistas diferentes | A **mesma pessoa** (ID do rastreamento) **em pé**, com as pernas esticadas e os dois pés acima da base, por **20 s**. **Sentar no banco nunca conta**, por mais tempo que seja: o banco do Drummond é para sentar. |
+| **Mão na área sensível** | MODERADO já tocava som; somava o tempo de turistas diferentes | Tempo por pessoa; só notifica com a **mesma pessoa** por **90 s**. Abraço ou mão no ombro para foto dura segundos. |
+| **Permanência junto ao monumento** | Virava alerta no histórico ("presença contínua há X min") | **Não é mais alerta**. Aparece só como informação no painel da câmera. |
 | **Notificação (som + mensagem)** | Cooldown por câmera e tipo: o mesmo episódio no Drummond virava 3 ou 4 notificações | Cooldown de `NOTIFY_COOLDOWN_SECONDS` **por patrimônio**, somando todas as câmeras e todos os tipos. Só um nível mais alto que o já notificado (ex.: ALTO → CRÍTICO) fura o cooldown. Tudo continua registrado no histórico (`GET /api/alerts`). |
 | **Referência do SSIM** | Se a captura falhava, usava uma imagem de demonstração como referência ou como frame atual, gerando "X% alterado" falso | Sem captura não compara nem troca a referência. A referência automática só é criada com o monumento livre de pessoas. |
 
@@ -223,10 +225,12 @@ Para apontar para outro backend, defina `VITE_API_BASE` (ex.: `VITE_API_BASE=htt
 | `LIVE_CAPTURE_FPS` / `LIVE_ANALYSIS_FPS` | `4` / `2` | Frames lidos / analisados por segundo |
 | `SURFACE_SUSPECT_SECONDS` | `4` | Tempo junto à superfície para virar "suspeito" |
 | `SURFACE_CHANGE_MIN_FRAC` / `SURFACE_CRITICAL_FRAC` | `0.03` / `0.08` | Alteração da superfície (longe das pessoas) para ALTO / CRÍTICO |
-| `SURFACE_CHANGE_CONFIRM_SECONDS` | `4` | Tempo que a alteração da superfície precisa se manter |
+| `SURFACE_CHANGE_CONFIRM_SECONDS` / `SURFACE_CLEAR_CONFIRM_SECONDS` | `180` / `60` | Alteração presente há X s, e mantida com a estátua livre por Y s |
+| `SURFACE_STILL_SECONDS` / `SURFACE_CHANGE_GAP_SECONDS` | `15` / `20` | Tempo que a alteração precisa estar parada / queda tolerada sem zerar a contagem |
+| `SURFACE_EVENT_COOLDOWN_SECONDS` | `1800` | Intervalo mínimo entre eventos de superfície da mesma câmera |
 | `SSIM_INCREASE_MODERADO` / `_ALTO` / `_CRITICO` | `5` / `10` / `20` | Aumento (p.p.) sobre o normal da câmera para cada nível |
-| `SSIM_CONFIRM_CHECKS` / `SSIM_CONFIRM_SECONDS` | `3` / `60` | Comparações seguidas e tempo mínimo para confirmar a mudança física |
-| `CLIMB_CONFIRM_SECONDS` | `5` | Tempo com os dois pés acima da base para "pessoa em cima" virar ALTO |
+| `SSIM_CONFIRM_CHECKS` / `SSIM_CONFIRM_SECONDS` | `4` / `300` | Comparações seguidas e tempo mínimo para confirmar a mudança física |
+| `CLIMB_CONFIRM_SECONDS` / `INTERACTION_ESCALATE_SECONDS` | `20` / `90` | Tempo da mesma pessoa em pé em cima da estátua / com a mão na área sensível para virar ALTO |
 | `EVIDENCE_PRE_SECONDS` / `EVIDENCE_POST_SECONDS` | `15` / `5` | Duração do clipe de evidência |
 | `NOTIFY_COOLDOWN_SECONDS` | `300` | Intervalo mínimo entre notificações do mesmo patrimônio |
 | `PERSON_LOITERING_ALERT_SECONDS` | `600` | Permanência que gera alerta preventivo |

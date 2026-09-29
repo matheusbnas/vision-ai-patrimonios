@@ -796,9 +796,12 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
             }`}>
               {selectedCodes.map((code) => {
                 const frame = frames[code]
-                // Presença contínua (loitering) é só informativa — não pinta o cabeçalho
+                // Presença contínua (loitering) é só informativa — não pinta o cabeçalho.
+                // Interação MODERADA (mão na estátua pra foto, confirmando) também não.
+                const interactionHigh = frame?.interaction_alert != null
+                  && frame.interaction_alert.level !== 'MODERADO'
                 const hasAlert = frame?.alert != null || frame?.risk_alert != null
-                  || frame?.interaction_alert != null || frame?.surface_alert != null
+                  || interactionHigh || frame?.surface_alert != null
                 // Data/hora + situação da imagem exibida neste quadrante
                 const clockInput = code in liveCams
                   ? { mode: 'live-analysis' as const, imageTs: liveFrameTs[code] ?? null }
@@ -940,7 +943,7 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                             🎨 POSSÍVEL PICHAÇÃO
                           </span>
                         </div>
-                      ) : frame?.interaction_alert ? (
+                      ) : interactionHigh ? (
                         <div className="absolute top-2 left-2 z-10">
                           <span className="text-[10px] px-2 py-0.5 rounded font-bold shadow-lg bg-red-600 text-white animate-pulse">
                             ✋ INTERAÇÃO COM A ESTÁTUA
@@ -1022,10 +1025,10 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
 
                       {/* Interação com a estátua (pose) */}
                       {frame?.interaction_alert && (
-                        <div className={`rounded-lg p-2 flex items-center gap-2 animate-pulse ${
+                        <div className={`rounded-lg p-2 flex items-center gap-2 ${
                           frame.interaction_alert.level === 'MODERADO'
-                            ? 'bg-yellow-100 text-yellow-900'
-                            : 'bg-red-100 text-red-800'
+                            ? 'bg-slate-100 text-slate-700'
+                            : 'bg-red-100 text-red-800 animate-pulse'
                         }`}>
                           <AlertTriangle size={16} className="shrink-0" />
                           <p className="font-bold text-[10px]">{frame.interaction_alert.message}</p>

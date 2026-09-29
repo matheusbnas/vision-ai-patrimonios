@@ -34,6 +34,7 @@ duplicado e alertas repetidos).
 import logging
 import threading
 import time
+import unicodedata
 from collections import deque
 from datetime import datetime
 from typing import Optional
@@ -49,6 +50,8 @@ from app.config import (
     SURFACE_CHANGE_MIN_FRAC,
     SURFACE_CRITICAL_FRAC,
     SURFACE_CHANGE_CONFIRM_SECONDS,
+    SURFACE_CLEAR_CONFIRM_SECONDS,
+    SURFACE_CHANGE_GAP_SECONDS,
     SURFACE_UNATTRIBUTED_ABSORB_SECONDS,
     SURFACE_EVENT_COOLDOWN_SECONDS,
     EVIDENCE_PRE_SECONDS,
@@ -63,9 +66,31 @@ logger = logging.getLogger(__name__)
 # ID que some por mais que isto é descartado (saiu de cena)
 TRACK_FORGET_SECONDS = 10
 # "Pessoa" sobre o contorno que não se move (centro desloca menos que
-# STATIC_MAX_SHIFT da largura do frame) por STATIC_MIN_SECONDS = a estátua
-STATIC_MIN_SECONDS = 15
-STATIC_MAX_SHIFT = 0.02
+# STATIC_MAX_SHIFT da largura do frame) por STATIC_MIN_SECONDS = a estátua.
+# 45 s: turista posando pra foto não fica tão parado por tanto tempo.
+STATIC_MIN_SECONDS = 45
+# Parado = 85% das posições a menos de STATIC_MAX_SHIFT da LARGURA DA
+# CAIXA do centro mediano. Relativo à caixa e robusto a frames ruins: o
+# stream corrompido faz a caixa da estátua tremer, e um frame isolado
+# fora do lugar não pode impedir o reconhecimento.
+STATIC_MAX_SHIFT = 0.15
+STATIC_INLIER_FRAC = 0.85
+# Aparência da estátua (tons de cinza normalizados) usada pra decidir, a
+# cada frame, se a caixa "pessoa" no lugar da estátua É a estátua (imagem
+# igual à aprendida) ou alguém parado na frente dela (imagem diferente)
+STATUE_TEMPLATE_SIZE = (48, 96)
+STATUE_MATCH_IOU = 0.6
+STATUE_MATCH_NCC = 0.55
+# Referência não reconhecida por este tempo é descartada (reaprende)
+STATUE_REF_TTL = 600
+# Falha de transmissão: fração da imagem (fora das pessoas) que mudou mais
+# que GLITCH_PIXEL_DIFF níveis de cinza entre duas análises
+GLITCH_SIZE = (160, 90)
+GLITCH_PIXEL_DIFF = 35
+GLITCH_FRAC = 0.30
+# Clipe de evidência no máximo este tanto antes da confirmação (a janela de
+# confirmação é de minutos; o buffer de frames fica limitado na memória)
+MAX_CLIP_SECONDS = 90
 # Superfície "desobstruída" pra servir de imagem ANTES do evento
 BEFORE_MIN_VISIBLE = 0.9
 # Faixa vermelha "possível pichação" no vídeo por este tempo após o alerta;
@@ -81,7 +106,9 @@ _YELLOW = (255, 215, 0)
 _MAGENTA = (255, 0, 200)
 _STATE_COLOR = {"passando": _GREEN, "na_zona": _ORANGE, "suspeito": _RED}
 # Hershey (cv2.putText) não desenha acento nem "·" — rótulos em ASCII
-_STATE_LABEL = {"na_zona": "Pessoa - na zona", "suspeito": "Pessoa - suspeito"}
+_STATE_TEXT = {"na_zona": "junto a estatua", "suspeito": "junto ha tempo"}
+_STATUE_COLOR = (120, 170, 255)
+_OTHER_COLOR = (230, 230, 230)
 
 
 def _within_reach(bbox: list, surface_px: tuple) -> bool:
@@ -97,6 +124,87 @@ def _within_reach(bbox: list, surface_px: tuple) -> bool:
     return dx <= reach and dy <= reach
 
 
+def _iou(a, b) -> float:
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _shift_score(centers: list, box_w: float) -> float:
+    """Deslocamento (em larguras da caixa) abaixo do qual estão STATIC_INLIER_FRAC
+    das posições, medido a partir do centro mediano."""
+    c = np.asarray(centers, np.float32)
+    med = np.median(c, axis=0)
+    d = np.abs(c - med).max(axis=1) / box_w
+    return float(np.quantile(d, STATIC_INLIER_FRAC))
+
+
+def _normalize(t: np.ndarray) -> np.ndarray:
+    return (t - t.mean()) / (t.std() + 1e-6)
+
+
+def _statue_tpl(image: np.ndarray, bbox) -> np.ndarray:
+    """Aparência do recorte (cinza, tamanho fixo, média 0 / desvio 1) — o
+    produto médio de dois desses é a correlação normalizada (NCC)."""
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1, y1, x2, y2 = max(x1, 0), max(y1, 0), min(x2, w), min(y2, h)
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return np.zeros(STATUE_TEMPLATE_SIZE[::-1], np.float32)
+    g = cv2.cvtColor(cv2.resize(crop, STATUE_TEMPLATE_SIZE, interpolation=cv2.INTER_AREA), cv2.COLOR_RGB2GRAY)
+    return _normalize(g.astype(np.float32))
+
+
+def _figure_box(statue_refs: dict, contour_px: Optional[tuple], w: int, h: int) -> Optional[tuple]:
+    """Superfície protegida = a figura da estátua (caixa do YOLO reconhecida
+    como estátua, com folga de 6%), recortada pelo contorno calibrado. Sem a
+    estátua reconhecida ainda, usa o contorno inteiro."""
+    if not statue_refs:
+        return contour_px
+    xs1, ys1, xs2, ys2 = zip(*(r["bbox"] for r in statue_refs.values()))
+    x1, y1, x2, y2 = min(xs1), min(ys1), max(xs2), max(ys2)
+    mx, my = (x2 - x1) * 0.06, (y2 - y1) * 0.06
+    x1, y1, x2, y2 = int(max(x1 - mx, 0)), int(max(y1 - my, 0)), int(min(x2 + mx, w)), int(min(y2 + my, h))
+    if contour_px:
+        x1, y1 = max(x1, contour_px[0]), max(y1, contour_px[1])
+        x2, y2 = min(x2, contour_px[2]), min(y2, contour_px[3])
+    return (x1, y1, x2, y2) if x2 - x1 >= 8 and y2 - y1 >= 8 else contour_px
+
+
+def _ascii(text: str) -> str:
+    """cv2.putText (Hershey) não desenha acento."""
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+
+
+def _hud_lines(r: dict, near: list[dict], surface: Optional[dict], surface_status: str,
+               statue_status: str = "") -> list[tuple[str, tuple]]:
+    """Painel no vídeo: o que o sistema está vendo e por que (não) alerta."""
+    people = sum(1 for d in r["objects"] if d["class_name"] == "pessoa" and not d.get("is_statue"))
+    lines = [(f"Pessoas: {people} | junto a estatua: {len(near)}", (255, 255, 255))]
+    if statue_status:
+        lines.append((f"Estatua: {statue_status}", _STATUE_COLOR))
+    if surface_status:
+        color = _RED if surface_status.startswith("ALERTA") else (
+            _YELLOW if "aguardando" in surface_status or "verificando" in surface_status else (200, 200, 200))
+        lines.append((f"Superficie: {surface_status}", color))
+    ia = r.get("interaction_alert")
+    for p in (ia or {}).get("progress", [])[:3]:
+        who = f"#{p['who']}" if str(p["who"]).isdigit() else "pessoa"
+        done = p["seconds"] >= p["needed"]
+        lines.append((f"{who} {p['label']}: {p['seconds']:.0f}/{p['needed']:.0f}s"
+                      + (" - ALERTA" if done else " (normal em foto)"),
+                      _RED if done else _ORANGE))
+    if r.get("risk_objects"):
+        nomes = ", ".join(sorted({d["class_name"] for d in r["risk_objects"]}))
+        lines.append((f"Objeto de risco encostado na estatua: {nomes}", _RED))
+    return [(_ascii(t), c) for t, c in lines]
+
+
 class CameraAnalysis:
     def __init__(self, code: str):
         self.code = code
@@ -109,6 +217,18 @@ class CameraAnalysis:
         self.tracks: dict[int, dict] = {}
         # IDs reconhecidos como a própria estátua (parados sobre o contorno)
         self.statue_ids: set[int] = set()
+        # Estátua aprendida: id → {"bbox", "tpl" (aparência), "seen", "ncc"}.
+        # O detector consulta statue_check() pra cada caixa "pessoa"
+        self.statue_refs: dict[int, dict] = {}
+        self.statue_status: str = "aprendendo (precisa ficar visivel e parada)"
+        # Superfície alterada sem ninguém por perto desde (ts) — confirmação
+        self.clear_since: Optional[float] = None
+        self.below_since: Optional[float] = None  # alteração abaixo do limite desde (ts)
+        # Situação da superfície pra sobreposição/painel (texto explicativo)
+        self.surface_status: str = ""
+        self.confirm: Optional[dict] = None     # evento decidido, aguardando o frame anotado
+        self.prev_small: Optional[np.ndarray] = None  # frame anterior reduzido (falha de transmissão)
+        self.glitch_frac = 0.0
         # Suspeitos recentes (track_id → último ts visto), sobrevivem ao track
         self.recent_suspects: dict[int, float] = {}
         self.surface = SurfaceMonitor()
@@ -125,8 +245,48 @@ class CameraAnalysis:
         self._lock = threading.Lock()
         self._times: list[float] = []  # ts das últimas análises (FPS real)
 
+    def glitch_check(self, frame: np.ndarray, person_boxes: list) -> bool:
+        """Frame corrompido/salto de câmera: fração grande da imagem (fora das
+        pessoas) mudou de uma análise pra outra (~0,5 s). Na orla normal —
+        ondas, guarda-sóis, gente passando — isso fica bem abaixo do limite."""
+        small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY), GLITCH_SIZE,
+                           interpolation=cv2.INTER_AREA).astype(np.int16)
+        prev, self.prev_small = self.prev_small, small
+        if prev is None or prev.shape != small.shape:
+            return False
+        h, w = frame.shape[:2]
+        sx, sy = GLITCH_SIZE[0] / w, GLITCH_SIZE[1] / h
+        keep = np.ones(small.shape, bool)
+        for x1, y1, x2, y2 in person_boxes:
+            keep[int(y1 * sy):int(y2 * sy) + 1, int(x1 * sx):int(x2 * sx) + 1] = False
+        if keep.mean() < 0.2:
+            return False
+        frac = float((np.abs(small - prev) > GLITCH_PIXEL_DIFF)[keep].mean())
+        self.glitch_frac = round(frac, 3)
+        return frac >= GLITCH_FRAC
+
+    def statue_check(self, bbox: list, image: np.ndarray) -> bool:
+        """A caixa é a estátua? Posição parecida com a aprendida E a imagem no
+        lugar da estátua igual à aparência aprendida. Alguém parado na frente
+        da estátua tem a mesma caixa, mas outra imagem → é pessoa."""
+        now = time.time()
+        for ref in self.statue_refs.values():
+            if _iou(bbox, ref["bbox"]) < STATUE_MATCH_IOU:
+                continue
+            cur = _statue_tpl(image, ref["bbox"])
+            ncc = float((cur * ref["tpl"]).mean())
+            ref["ncc"] = ncc
+            if ncc >= STATUE_MATCH_NCC:
+                ref["seen"] = now
+                if ncc >= 0.8:  # acompanha devagar a luz do dia
+                    ref["tpl"] = _normalize(0.95 * ref["tpl"] + 0.05 * cur)
+                self.statue_status = f"reconhecida (semelhanca {ncc:.2f})"
+                return True
+            self.statue_status = f"encoberta por pessoa na frente (semelhanca {ncc:.2f})"
+        return False
+
     def update_tracks(self, objects: list[dict], ts: float, frame_w: int,
-                      surface_px: Optional[tuple] = None) -> list[dict]:
+                      surface_px: Optional[tuple] = None, frame: Optional[np.ndarray] = None) -> list[dict]:
         """Atualiza permanência e estado por ID (grava d["state"]); devolve as pessoas junto à estátua."""
         near_now = []
         for d in objects:
@@ -138,15 +298,27 @@ class CameraAnalysis:
             t = self.tracks.setdefault(tid, {"first": ts, "last": ts, "near_since": None,
                                              "origin": center, "max_shift": 0.0, "suspect": False})
             t["last"] = ts
-            shift = max(abs(center[0] - t["origin"][0]), abs(center[1] - t["origin"][1])) / max(frame_w, 1)
-            t["max_shift"] = max(t["max_shift"], shift)
+            t.setdefault("centers", []).append(center)
+            del t["centers"][:-400]
+            t["max_shift"] = _shift_score(t["centers"], max(x2 - x1, 1))
             # Estátua: parada sobre o contorno tempo suficiente
-            if (tid not in self.statue_ids and (d["statue_overlap"] or 0) >= 0.8
-                    and ts - t["first"] >= STATIC_MIN_SECONDS and t["max_shift"] < STATIC_MAX_SHIFT):
+            if (tid not in self.statue_ids and frame is not None and (d["statue_overlap"] or 0) >= 0.8
+                    and ts - t["first"] >= STATIC_MIN_SECONDS and t["max_shift"] < STATIC_MAX_SHIFT
+                    and not any(_iou(d["bbox"], r["bbox"]) >= STATUE_MATCH_IOU for r in self.statue_refs.values())):
                 self.statue_ids.add(tid)
+                self.statue_refs[tid] = {"bbox": list(d["bbox"]), "tpl": _statue_tpl(frame, d["bbox"]),
+                                         "seen": time.time(), "ncc": 1.0}
                 self.recent_suspects.pop(tid, None)
-                logger.info(f"[análise {self.code}] ID #{tid} reconhecido como a própria estátua (parado)")
-            if d.get("is_statue") or tid in self.statue_ids:
+                t["suspect"] = False
+                d["is_statue"] = True
+                self.statue_status = "reconhecida (aprendida agora)"
+                logger.info(f"[análise {self.code}] ID #{tid} reconhecido como a própria estátua "
+                            f"(parado {STATIC_MIN_SECONDS}s)")
+            # Alguém na frente da estátua chega aqui com is_statue=False
+            # (aparência não bate) e conta como gente perto
+            if d.get("is_statue"):
+                t["suspect"] = False
+                self.recent_suspects.pop(tid, None)
                 continue
             # Com contorno calibrado: ao alcance da superfície; sem: dentro da zona
             near = _within_reach(d["bbox"], surface_px) if surface_px else d["in_zone"]
@@ -166,6 +338,10 @@ class CameraAnalysis:
         for tid in [k for k, v in self.tracks.items() if ts - v["last"] > TRACK_FORGET_SECONDS]:
             del self.tracks[tid]
             self.statue_ids.discard(tid)
+        now = time.time()
+        for key in [k for k, r in self.statue_refs.items() if now - r["seen"] > STATUE_REF_TTL]:
+            del self.statue_refs[key]
+            logger.info(f"[análise {self.code}] referência da estátua #{key} expirada — reaprendendo")
         for tid in [k for k, v in self.recent_suspects.items() if ts - v > SURFACE_SUSPECT_MEMORY_SECONDS]:
             del self.recent_suspects[tid]
         return sorted(near_now, key=lambda x: -x["seconds"])
@@ -203,15 +379,24 @@ def _banner(img: np.ndarray, text: str, scale: float, strong: bool):
                     scale, (255, 255, 255), th, cv2.LINE_AA)
 
 
-def draw_overlay(img: np.ndarray, objects: list[dict], zone_px: tuple, surface_px: Optional[tuple],
-                 surface: Optional[dict], risk_objects: list[dict], last_event: Optional[dict], ts: float):
-    """Zona (amarelo), superfície (vermelho), mudança (magenta) e pessoas por estado."""
+def draw_overlay(img: np.ndarray, objects: list[dict], zone_px: tuple, contour_px: Optional[tuple],
+                 surface_px: Optional[tuple], surface: Optional[dict], risk_objects: list[dict],
+                 last_event: Optional[dict], ts: float, hud: Optional[list] = None):
+    """
+    Zona (amarelo), contorno calibrado (laranja fino), figura protegida
+    (vermelho), mudança (magenta), TODAS as detecções do YOLO com classe e
+    confiança (%), pessoas por estado/ID e o painel explicando o que o
+    sistema está vendo e por que (não) alerta.
+    """
     s = max(img.shape[1] / 1280, 0.4)
     lw = max(int(2 * s), 1)
     zx1, zy1, zx2, zy2 = zone_px
     cv2.rectangle(img, (zx1, zy1), (zx2, zy2), _YELLOW, lw)
     _label(img, "Zona monitorada", (zx1, zy2 + int(24 * s)), _YELLOW, 0.5 * s)
 
+    if contour_px and contour_px != surface_px:
+        cx1, cy1, cx2, cy2 = contour_px
+        cv2.rectangle(img, (cx1, cy1), (cx2, cy2), _ORANGE, 1)
     if surface_px:
         sx1, sy1, sx2, sy2 = surface_px
         if surface and surface.get("mask") is not None:
@@ -219,27 +404,37 @@ def draw_overlay(img: np.ndarray, objects: list[dict], zone_px: tuple, surface_p
             m = surface["mask"][:roi.shape[0], :roi.shape[1]]
             roi[m] = (0.45 * roi[m] + 0.55 * np.array(_MAGENTA)).astype(np.uint8)
         cv2.rectangle(img, (sx1, sy1), (sx2, sy2), _RED, lw + 1)
-        _label(img, "Superficie protegida", (sx1, sy2 + int(24 * s)), _RED, 0.5 * s)
+        _label(img, "Estatua protegida", (sx1, sy2 + int(24 * s)), _RED, 0.5 * s)
 
+    risk_ids = {id(d) for d in risk_objects}
     for d in objects:
-        state = d.get("state")
-        if d["class_name"] != "pessoa" or d.get("is_statue") or not state:
-            continue
         x1, y1, x2, y2 = d["bbox"]
-        color = _STATE_COLOR[state]
-        cv2.rectangle(img, (x1, y1), (x2, y2), color, lw if state == "passando" else lw + 1)
-        if state in _STATE_LABEL:
-            _label(img, f"{_STATE_LABEL[state]} #{d['track_id']}", (x1, y1), color, 0.5 * s)
+        conf = f"{d['confidence'] * 100:.0f}%"
+        if d["class_name"] == "pessoa" and d.get("is_statue"):
+            color, text, thick = _STATUE_COLOR, f"estatua (ignorada) {conf}", lw
+        elif d["class_name"] == "pessoa":
+            state = d.get("state") or "passando"
+            color = _STATE_COLOR[state]
+            tid = f" #{d['track_id']}" if d.get("track_id") is not None else ""
+            text = f"pessoa {conf}{tid}" + (f" - {_STATE_TEXT[state]}" if state in _STATE_TEXT else "")
+            thick = lw if state == "passando" else lw + 1
+        elif id(d) in risk_ids:
+            color, text, thick = _RED, f"{d['class_name']} {conf} - RISCO", lw + 1
+        else:
+            color, text, thick = _OTHER_COLOR, f"{d['class_name']} {conf}", 1
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, thick)
+        _label(img, _ascii(text), (x1, y1), color, 0.45 * s)
 
-    for d in risk_objects:
-        x1, y1, x2, y2 = d["bbox"]
-        cv2.rectangle(img, (x1, y1), (x2, y2), _RED, lw + 1)
-        _label(img, d["class_name"], (x1, y1), _RED, 0.5 * s)
+    # Painel (canto superior esquerdo abaixo do logo do COR, que o player já tem)
+    y = int(150 * s)
+    for text, color in hud or []:
+        _label(img, text, (int(10 * s), y), color, 0.5 * s)
+        y += int(26 * s)
 
     if last_event:
         age = ts - last_event["timestamp"]
         if age <= EVENT_BANNER_SECONDS:
-            _banner(img, "Possivel pichacao detectada - requer validacao humana", 0.7 * s, True)
+            _banner(img, "Estatua alterada apos as pessoas sairem - requer validacao humana", 0.7 * s, True)
         elif age <= EVENT_NOTE_SECONDS:
             hhmm = datetime.fromtimestamp(last_event["timestamp"]).strftime("%H:%M:%S")
             _banner(img, f"Alerta registrado as {hhmm}", 0.5 * s, False)
@@ -285,49 +480,66 @@ class LiveAnalyzer:
 
     def _analyze(self, cam: CameraAnalysis, frame: np.ndarray, ts: float, monitor_api):
         t0 = time.time()
-        r = cam.detector.detect(frame, camera_code=cam.code, track=True,
-                                statue_track_ids=cam.statue_ids, draw=False)
+        # Com a estátua já reconhecida, o detector recebe as caixas de
+        # referência dela (ver detector: caixa que cresceu = turista fundido)
+        r = cam.detector.detect(frame, camera_code=cam.code, track=True, draw=False,
+                                statue_check=cam.statue_check)
         h, w = frame.shape[:2]
         zone_px = _zone_box(w, h, cam.code)
-        surface_px = _frac_box(zone_service.get_statue(cam.code)["statue"], w, h)
-        near = cam.update_tracks(r["objects"], ts, w, surface_px)
+        contour_px = _frac_box(zone_service.get_statue(cam.code)["statue"], w, h)
+        # Superfície protegida = a FIGURA da estátua (caixa do YOLO parada
+        # sobre o contorno), não o retângulo calibrado inteiro — o banco do
+        # Drummond é pra sentar; o que se protege é a estátua
+        surface_px = _figure_box(cam.statue_refs, contour_px, w, h)
+        near = cam.update_tracks(r["objects"], ts, w, surface_px, frame)
 
         if cam.name is None and monitor_api.camera_service:
             c = monitor_api.camera_service.get_camera_by_code(cam.code)
             cam.name = c.get("name", cam.code) if c else cam.code
         name = cam.name or cam.code
 
+        # ─── Falha de transmissão ────────────────────────────────────
+        # Stream com blocos borrados/congelados (perda de pacote) muda boa
+        # parte da imagem de uma vez — a superfície "altera" sem nada ter
+        # acontecido. Nesses frames a análise da superfície fica em pausa.
+        glitch = cam.glitch_check(frame, [d["bbox"] for d in r["objects"]])
+
         # ─── Superfície protegida ────────────────────────────────────
         surface = None
-        if surface_px:
+        if surface_px and glitch:
+            # Só pausa: não zera as contagens (frame ruim no meio de uma
+            # alteração real não pode reiniciar a janela de minutos)
+            cam.surface_status = "PAUSADA - imagem com falha de transmissao"
+        elif surface_px:
             # Tudo que o YOLO achou na frente da superfície (menos a própria
             # estátua) é oclusão, não mudança
-            occluders = [d["bbox"] for d in r["objects"] if not d.get("is_statue")
-                         and d.get("track_id") not in cam.statue_ids]
+            occluders = [d["bbox"] for d in r["objects"] if not d.get("is_statue")]
             surface = cam.surface.update(frame, surface_px, occluders)
 
-        # Permanência REAL por pessoa (substitui a aproximação por classe
-        # do detector) — informativa, não notifica (ver alert_service)
+        # Permanência junto ao monumento: só informativa (painel/vídeo).
+        # Sentar no banco do Drummond por muito tempo é o uso normal do lugar
+        # — não vira alerta nem entra no histórico.
         loitering = None
         if near and near[0]["seconds"] >= PERSON_LOITERING_ALERT_SECONDS:
             top = near[0]
             loitering = {
-                "level": "MODERADO",
-                "message": f"👥 Pessoa #{top['track_id']} junto ao monumento há {int(top['seconds'] // 60)} min",
+                "level": "INFO",
+                "message": f"👥 Pessoa #{top['track_id']} junto ao monumento há {int(top['seconds'] // 60)} min (informativo)",
                 "dwell_seconds": top["seconds"],
             }
 
         monitor_api.record_risk_alert(cam.code, name, r["risk_alert"])
         monitor_api.record_interaction_alert(cam.code, name, r["interaction_alert"])
-        monitor_api.record_loitering_alert(cam.code, name, loitering)
+
+        surface_alert = None if glitch else self._surface_events(cam, name, ts, surface, near)
 
         annotated = r["annotated_image"]
-        draw_overlay(annotated, r["objects"], zone_px, surface_px, surface,
-                     r["risk_objects"], cam.last_event, ts)
+        hud = _hud_lines(r, near, surface, cam.surface_status, cam.statue_status)
+        draw_overlay(annotated, r["objects"], zone_px, contour_px, surface_px, surface,
+                     r["risk_objects"], cam.last_event, ts, hud)
         _, buf = cv2.imencode(".jpg", cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 80])
         jpg = buf.tobytes()
-
-        surface_alert = self._surface_events(cam, name, ts, surface, jpg)
+        self._evidence(cam, ts, jpg, surface)
 
         objects = [{k: v for k, v in d.items()} for d in r["objects"]]
         with cam._lock:
@@ -352,6 +564,9 @@ class LiveAnalyzer:
                     "calibrated": surface_px is not None,
                     "change_frac": surface["change_frac"] if surface else None,
                     "clear_change_frac": surface.get("clear_change_frac") if surface else None,
+                    "stable_change_frac": surface.get("stable_change_frac") if surface else None,
+                    "status": cam.surface_status,
+                    "transmission_glitch": glitch,
                     "visible_frac": surface["visible_frac"] if surface else None,
                 },
                 "suspects": sorted(cam.recent_suspects),
@@ -360,15 +575,114 @@ class LiveAnalyzer:
             }
 
     def _surface_events(self, cam: CameraAnalysis, name: str, ts: float,
-                        surface: Optional[dict], jpg: bytes) -> Optional[dict]:
-        """Mudança sustentada na superfície + suspeito → evento com evidências."""
-        # Buffer do clipe: o suficiente pra cobrir PRE antes do início da mudança
-        keep = EVIDENCE_PRE_SECONDS + SURFACE_UNATTRIBUTED_ABSORB_SECONDS + EVIDENCE_POST_SECONDS
+                        surface: Optional[dict], near: list[dict]) -> Optional[dict]:
+        """
+        Decide se a superfície da estátua foi alterada de verdade.
+
+        Turista abraçando/encostando/tirando foto muda os pixels da estátua
+        enquanto está lá — e a mudança some quando ele sai. Pichação, peça
+        arrancada ou dano CONTINUAM depois. Por isso o evento só confirma
+        quando a alteração se mantém com a estátua LIVRE (ninguém ao alcance)
+        por SURFACE_CLEAR_CONFIRM_SECONDS, e alguém esteve junto antes
+        (suspeito recente). Atualiza cam.surface_status (texto pro vídeo).
+        """
+        if surface is None:
+            cam.surface_status = ""
+            return None
+
+        # Só conta a mudança fora do halo de quem está na frente E parada
+        # (sem movimento): pessoa não detectada e falha de transmissão mexem
+        clear_frac = surface.get("stable_change_frac", surface.get("clear_change_frac", surface["change_frac"]))
+        pct = round(clear_frac * 100, 1)
+        if clear_frac < SURFACE_CHANGE_MIN_FRAC:
+            # Queda curta (alguém passou na frente, frame ruim) não zera: só
+            # "some" se ficar abaixo do limite por SURFACE_CHANGE_GAP_SECONDS
+            cam.below_since = cam.below_since or ts
+            if cam.change_since is None or ts - cam.below_since >= SURFACE_CHANGE_GAP_SECONDS:
+                cam.change_since = cam.clear_since = None
+                cam.surface_status = f"Estatua sem alteracao ({pct}%)"
+            return None
+        cam.below_since = None
+
+        cam.change_since = cam.change_since or ts
+        sustained = ts - cam.change_since
+        suspects = sorted(cam.recent_suspects)
+        if not suspects:
+            cam.clear_since = None
+            if sustained >= SURFACE_UNATTRIBUTED_ABSORB_SECONDS:
+                # Mudou sem ninguém junto (luz, objeto deixado, câmera mexeu):
+                # vira fundo — não dispara quando alguém chegar depois
+                logger.info(f"[análise {cam.code}] mudança na superfície sem suspeito — absorvida")
+                cam.surface.absorb()
+                cam.change_since = None
+            cam.surface_status = f"Alteracao {pct}% sem ninguem junto antes - ignorando (luz/sombra)"
+            return None
+
+        # Alguém ao alcance da estátua agora: a "alteração" pode ser a própria
+        # pessoa/sombra — espera ela se afastar pra ver se a mudança fica
+        if near:
+            cam.clear_since = None
+            cam.surface_status = (f"Alteracao {pct}% ha {sustained:.0f}s com pessoas junto - "
+                                  f"aguardando a estatua ficar livre")
+            return None
+
+        cam.clear_since = cam.clear_since or ts
+        clear_for = ts - cam.clear_since
+        if clear_for < SURFACE_CLEAR_CONFIRM_SECONDS or sustained < SURFACE_CHANGE_CONFIRM_SECONDS:
+            cam.surface_status = (f"Alteracao {pct}% ha {sustained:.0f}/{SURFACE_CHANGE_CONFIRM_SECONDS:.0f}s, "
+                                  f"estatua livre ha {clear_for:.0f}/{SURFACE_CLEAR_CONFIRM_SECONDS:.0f}s - verificando")
+            return None
+        if cam.pending or ts < cam.cooldown_until:
+            cam.surface_status = f"Alteracao {pct}% - alerta ja registrado"
+            return None
+
+        # ─── Confirma o evento ───────────────────────────────────────
+        ids = ", ".join(f"#{i}" for i in suspects)
+        level = "CRÍTICO" if clear_frac >= SURFACE_CRITICAL_FRAC else "ALTO"
+        alert = {
+            "level": level,
+            "message": (f"🎨 {level}: Estátua alterada ({pct}% da figura) e a alteração CONTINUOU depois que "
+                        f"as pessoas se afastaram ({int(clear_for)}s com a estátua livre). Pessoa(s) {ids} "
+                        f"estiveram junto antes. Possível pichação/dano — requer validação humana"),
+        }
+        cam.confirm = {"alert": alert, "pct": pct, "suspects": suspects, "ids": ids}
+        cam.surface_status = f"ALERTA: alteracao {pct}% permaneceu com a estatua livre"
+        return alert
+
+    def _evidence(self, cam: CameraAnalysis, ts: float, jpg: bytes, surface: Optional[dict]):
+        """Buffer do clipe, imagem 'antes', registro do evento confirmado e fechamento do clipe."""
+        keep = EVIDENCE_PRE_SECONDS + MAX_CLIP_SECONDS + EVIDENCE_POST_SECONDS
         cam.evidence_buf.append((ts, jpg))
         while cam.evidence_buf and ts - cam.evidence_buf[0][0] > keep:
             cam.evidence_buf.popleft()
+        if surface and surface["visible_frac"] >= BEFORE_MIN_VISIBLE and surface["change_frac"] == 0:
+            cam.before_jpg = jpg
 
-        # Evento confirmado aguardando o "depois": fecha e grava o clipe
+        # Evento confirmado agora: registra com a imagem deste frame ("durante")
+        if cam.confirm:
+            c, cam.confirm = cam.confirm, None
+            name = cam.name or cam.code
+            event_id = datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S")
+            meta = evidence_service.start_event(cam.code, event_id, {
+                "timestamp": ts,
+                "camera_name": name,
+                "change_started_at": cam.change_since,
+                "change_percent": c["pct"],
+                "suspect_track_ids": c["suspects"],
+                "message": c["alert"]["message"],
+            }, cam.before_jpg, jpg)
+            entry = alert_service.add_alert(cam.code, name, c["alert"]["level"], c["alert"]["message"],
+                                            source="surface",
+                                            objects=[f"pessoa {i}" for i in c["ids"].split(", ")], evidence=meta)
+            cam.pending = {"meta": meta, "alert_id": entry["id"], "finalize_at": ts + EVIDENCE_POST_SECONDS,
+                           # Do início da alteração (limitado a MAX_CLIP_SECONDS antes de agora)
+                           "clip_from": max((cam.change_since or ts) - EVIDENCE_PRE_SECONDS, ts - MAX_CLIP_SECONDS)}
+            cam.cooldown_until = ts + SURFACE_EVENT_COOLDOWN_SECONDS
+            cam.last_event = meta
+            logger.warning(f"[análise {cam.code}] 🎨 evento de superfície {event_id}: {c['pct']}% alterado, "
+                           f"suspeitos {c['ids']}")
+
+        # Evento aguardando o "depois": fecha e grava o clipe
         if cam.pending and ts >= cam.pending["finalize_at"]:
             p, cam.pending = cam.pending, None
             frames = [(t, j) for t, j in cam.evidence_buf if t >= p["clip_from"]]
@@ -380,61 +694,7 @@ class LiveAnalyzer:
 
             evidence_service.finish_event(p["meta"], jpg, frames, on_done=_done)
             cam.surface.absorb()  # a mudança já virou evento: passa a ser o novo normal
-
-        if surface is None:
-            return None
-
-        # Só a mudança fora do halo de quem está na frente confirma: sombra,
-        # mochila e perna de turista sentado ao lado ficam de fora
-        clear_frac = surface.get("clear_change_frac", surface["change_frac"])
-        changed = clear_frac >= SURFACE_CHANGE_MIN_FRAC
-        if not changed:
-            cam.change_since = None
-            if surface["visible_frac"] >= BEFORE_MIN_VISIBLE and surface["change_frac"] == 0:
-                cam.before_jpg = jpg
-            return None
-
-        if cam.change_since is None:
-            cam.change_since = ts
-        sustained = ts - cam.change_since
-        suspects = sorted(cam.recent_suspects)
-        if not suspects:
-            if sustained >= SURFACE_UNATTRIBUTED_ABSORB_SECONDS:
-                # Mudou sem ninguém suspeito junto (luz, objeto deixado, câmera
-                # mexeu): vira fundo — não dispara quando alguém chegar depois
-                logger.info(f"[análise {cam.code}] mudança na superfície sem suspeito — absorvida")
-                cam.surface.absorb()
-                cam.change_since = None
-            return None
-        if sustained < SURFACE_CHANGE_CONFIRM_SECONDS or cam.pending or ts < cam.cooldown_until:
-            return None
-
-        # ─── Confirma o evento ───────────────────────────────────────
-        pct = round(clear_frac * 100, 1)
-        ids = ", ".join(f"#{i}" for i in suspects)
-        level = "CRÍTICO" if clear_frac >= SURFACE_CRITICAL_FRAC else "ALTO"
-        alert = {
-            "level": level,
-            "message": (f"🎨 {level}: Possível pichação/alteração na superfície protegida ({pct}% alterado) "
-                        f"com pessoa suspeita {ids} junto — requer validação humana"),
-        }
-        event_id = datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S")
-        meta = evidence_service.start_event(cam.code, event_id, {
-            "timestamp": ts,
-            "camera_name": name,
-            "change_started_at": cam.change_since,
-            "change_percent": pct,
-            "suspect_track_ids": suspects,
-            "message": alert["message"],
-        }, cam.before_jpg, jpg)  # durante = agora: suspeito + mudança no mesmo frame
-        entry = alert_service.add_alert(cam.code, name, alert["level"], alert["message"], source="surface",
-                                        objects=[f"pessoa {i}" for i in ids.split(", ")], evidence=meta)
-        cam.pending = {"meta": meta, "alert_id": entry["id"], "finalize_at": ts + EVIDENCE_POST_SECONDS,
-                       "clip_from": cam.change_since - EVIDENCE_PRE_SECONDS}
-        cam.cooldown_until = ts + SURFACE_EVENT_COOLDOWN_SECONDS
-        cam.last_event = meta
-        logger.warning(f"[análise {cam.code}] 🎨 evento de superfície {event_id}: {pct}% alterado, suspeitos {ids}")
-        return alert
+            cam.change_since = cam.clear_since = None
 
 
 # ─── Registro global ─────────────────────────────────────────────

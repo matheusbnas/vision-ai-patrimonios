@@ -463,15 +463,10 @@ def record_risk_alert(camera_code: str, camera_name: str, risk_alert: Optional[d
 
 
 def record_loitering_alert(camera_code: str, camera_name: str, loitering_alert: Optional[dict]) -> None:
-    """Registra no alert_service um alerta de permanência suspeita de pessoa, se houver."""
-    if loitering_alert:
-        alert_service.add_alert(
-            camera_code=camera_code,
-            camera_name=camera_name,
-            level=loitering_alert["level"],
-            message=loitering_alert["message"],
-            source="loitering",
-        )
+    """Permanência de pessoas junto ao monumento NÃO vira alerta: sentar no
+    banco do Drummond por muito tempo é o uso normal do lugar. Continua só
+    como informação no painel da câmera (loitering_alert na resposta)."""
+    return None
 
 
 def record_interaction_alert(camera_code: str, camera_name: str, interaction_alert: Optional[dict]) -> None:

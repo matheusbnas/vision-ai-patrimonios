@@ -10,6 +10,7 @@ dentro dessa zona — antes de qualquer dano físico ser registrado.
 
 import time
 import logging
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -26,9 +27,11 @@ from app.config import (
     DWELL_ALERT_SECONDS,
     PERSON_LOITERING_ALERT_SECONDS,
     STATUE_OBJECT_OVERLAP,
+    INTERACTION_GRACE_SECONDS,
 )
 from app.services import zone_service, risk_tracker
-from app.models.interaction import shared_analyzer, _overlap_frac, is_statue_itself
+from app.models import interaction
+from app.models.interaction import shared_analyzer, _overlap_frac, is_statue_itself, PRINT_GRACE_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +101,8 @@ class PatrimonyDetector:
 
     def detect(self, image: np.ndarray, confidence: Optional[float] = None,
                camera_code: Optional[str] = None, track: bool = False,
-               statue_track_ids: Optional[set] = None, draw: bool = True) -> dict:
+               statue_track_ids: Optional[set] = None, draw: bool = True,
+               statue_check=None) -> dict:
         """
         Executa detecção em uma imagem, filtrando objetos de risco
         pelo quadrante (zona) do monumento.
@@ -161,6 +165,21 @@ class PatrimonyDetector:
                     patrimony_type = INTEREST_CLASSES.get(class_name, "Outro")
                     bbox = [int(x1), int(y1), int(x2), int(y2)]
 
+                    # A própria estátua detectada como "pessoa".
+                    # Análise contínua (statue_check): decide pela APARÊNCIA —
+                    # a caixa precisa bater com a estátua aprendida (posição e
+                    # imagem). Pela posição só, quem para NA FRENTE da estátua
+                    # herdava o rótulo, ficava invisível às regras e o corpo
+                    # dele virava "alteração na estátua".
+                    # Prints (sem vídeo): geometria do contorno.
+                    if class_name != "pessoa":
+                        is_statue = False
+                    elif statue_check is not None:
+                        is_statue = statue_check(bbox, image)
+                    else:
+                        is_statue = is_statue_itself(bbox, statue_px) or (
+                            track_id is not None and track_id in (statue_track_ids or ()))
+
                     detection = {
                         "class_id": class_id,
                         "class_name": class_name,
@@ -171,24 +190,33 @@ class PatrimonyDetector:
                         # Fração da caixa do objeto dentro do contorno da
                         # estátua (None = câmera sem contorno calibrado)
                         "statue_overlap": round(_overlap_frac(bbox, statue_px), 3) if statue_px else None,
-                        # A própria estátua detectada como "pessoa"
-                        # A própria estátua detectada como "pessoa": pela
-                        # sobreposição com o contorno ou (análise contínua)
-                        # por ser um ID que nunca se move sobre ele
-                        "is_statue": class_name == "pessoa" and (
-                            is_statue_itself(bbox, statue_px)
-                            or (track_id is not None and track_id in (statue_track_ids or ()))
-                        ),
+                        "is_statue": is_statue,
                         "track_id": track_id,
                     }
                     detections.append(detection)
                     class_counts[class_name] += 1
 
-            # Gerar imagem anotada
+            # Imagem anotada: toda detecção com classe (PT) e confiança (%);
+            # a estátua reconhecida aparece como "estatua (ignorada)"
+            annotated_image = image.copy()
             if draw:
-                annotated_image = cv2.cvtColor(result.plot(), cv2.COLOR_BGR2RGB)
-            else:
-                annotated_image = image.copy()
+                s = max(w / 1280, 0.4)
+                for d in detections:
+                    x1, y1, x2, y2 = d["bbox"]
+                    conf_txt = f"{d['confidence'] * 100:.0f}%"
+                    if d["is_statue"]:
+                        color, text = (120, 170, 255), f"estatua (ignorada) {conf_txt}"
+                    elif d["class_name"] == "pessoa":
+                        color, text = (255, 160, 0), f"pessoa {conf_txt}"
+                    else:
+                        color, text = (230, 230, 230), f"{d['class_name']} {conf_txt}"
+                    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+                    cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, max(int(2 * s), 1))
+                    (tw, th), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5 * s, 1)
+                    ty = max(y1 - 4, th + base + 2)
+                    cv2.rectangle(annotated_image, (x1, ty - th - base - 2), (x1 + tw + 6, ty + 2), (25, 25, 25), -1)
+                    cv2.putText(annotated_image, text, (x1 + 3, ty - base), cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5 * s, color, 1, cv2.LINE_AA)
         else:
             annotated_image = image.copy()
 
@@ -262,9 +290,9 @@ class PatrimonyDetector:
         if person_present and person_dwell_seconds >= PERSON_LOITERING_ALERT_SECONDS:
             minutos = int(person_dwell_seconds // 60)
             loitering_alert = {
-                "level": "MODERADO",
+                "level": "INFO",
                 "message": (
-                    f"👥 Presença contínua de pessoas junto ao monumento há {minutos} min"
+                    f"👥 Pessoas junto ao monumento há {minutos} min (informativo — não é alerta)"
                 ),
                 "dwell_seconds": round(person_dwell_seconds, 1),
             }
@@ -282,9 +310,12 @@ class PatrimonyDetector:
                 interaction_alert = self.interaction.analyze(
                     image, tracker_key, statue_px, sensitive_px, annotated=annotated_image,
                     statue_boxes=[d["bbox"] for d in detections if d["is_statue"]],
+                    people=[(d["bbox"], d["track_id"]) for d in detections
+                            if d["class_name"] == "pessoa" and not d["is_statue"]],
+                    continuous=track,
                 )
             else:
-                risk_tracker.update(f"{tracker_key}::interacao", set())
+                interaction.clear(tracker_key, INTERACTION_GRACE_SECONDS if track else PRINT_GRACE_SECONDS)
 
         # ─── Desenha zona, contorno da estátua e objetos de risco ────────
         zx1, zy1, zx2, zy2 = zone

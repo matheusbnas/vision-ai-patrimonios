@@ -80,11 +80,16 @@ LIVE_CAPTURE_BUFFER_SECONDS = float(os.getenv("LIVE_CAPTURE_BUFFER_SECONDS", "4"
 LIVE_ANALYSIS_FPS = float(os.getenv("LIVE_ANALYSIS_FPS", "2"))
 
 # ─── Superfície protegida + pessoa suspeita (análise contínua) ───
-# Superfície = contorno calibrado da estátua; zona monitorada = quadrante.
-# Pessoa junto à superfície por este tempo seguido → "suspeito".
+# O que se procura é mudança na ESTRUTURA FÍSICA da estátua (pichação,
+# peça arrancada, dano) — algo que FICA. Por isso as janelas são de
+# minutos: pessoa, sombra, reflexo, vendedor passando e falha de
+# transmissão duram segundos e não chegam a confirmar.
+# Superfície = a figura da estátua (dentro do contorno calibrado).
+# Pessoa junto à superfície por este tempo seguido → "esteve junto".
 SURFACE_SUSPECT_SECONDS = float(os.getenv("SURFACE_SUSPECT_SECONDS", "4"))
-# Uma mudança na superfície é associada a um suspeito visto até este tempo antes
-SURFACE_SUSPECT_MEMORY_SECONDS = float(os.getenv("SURFACE_SUSPECT_MEMORY_SECONDS", "60"))
+# Uma mudança na superfície é associada a quem esteve junto até este tempo
+# antes (cobre toda a janela de confirmação abaixo)
+SURFACE_SUSPECT_MEMORY_SECONDS = float(os.getenv("SURFACE_SUSPECT_MEMORY_SECONDS", "900"))
 # Fração da superfície visível alterada de forma persistente pra contar como
 # mudança. Só conta a mudança LONGE de quem está na frente (ver
 # SurfaceMonitor: sombra/mochila/roupa fora da caixa do YOLO ficam de fora).
@@ -92,13 +97,23 @@ SURFACE_SUSPECT_MEMORY_SECONDS = float(os.getenv("SURFACE_SUSPECT_MEMORY_SECONDS
 SURFACE_CHANGE_MIN_FRAC = float(os.getenv("SURFACE_CHANGE_MIN_FRAC", "0.03"))
 # A partir desta fração a alteração é CRÍTICO; entre MIN e isto, ALTO
 SURFACE_CRITICAL_FRAC = float(os.getenv("SURFACE_CRITICAL_FRAC", "0.08"))
-# Mudança sustentada por este tempo (com suspeito) → alerta
-SURFACE_CHANGE_CONFIRM_SECONDS = float(os.getenv("SURFACE_CHANGE_CONFIRM_SECONDS", "4"))
-# Mudança sem nenhum suspeito por este tempo é absorvida (mudança de cena,
-# objeto deixado) — não dispara depois quando alguém se aproximar
-SURFACE_UNATTRIBUTED_ABSORB_SECONDS = 60
+# A alteração precisa estar presente (parada, fora das pessoas) há pelo
+# menos este tempo...
+SURFACE_CHANGE_CONFIRM_SECONDS = float(os.getenv("SURFACE_CHANGE_CONFIRM_SECONDS", "180"))
+# ...e CONTINUAR com a estátua livre (ninguém ao alcance) por este tempo.
+# Turista abraçando/encostando/sentado ao lado muda os pixels só enquanto
+# está lá; pichação e dano ficam depois que todos saem.
+SURFACE_CLEAR_CONFIRM_SECONDS = float(os.getenv("SURFACE_CLEAR_CONFIRM_SECONDS", "60"))
+# Queda curta da alteração (alguém passou na frente, frame ruim) não zera
+# a contagem — só some de verdade se ficar abaixo do limite por este tempo
+SURFACE_CHANGE_GAP_SECONDS = float(os.getenv("SURFACE_CHANGE_GAP_SECONDS", "20"))
+# Mudança sem ninguém junto antes, por este tempo, é absorvida (luz do dia,
+# objeto deixado, câmera mexeu) — não dispara depois quando alguém chegar
+SURFACE_UNATTRIBUTED_ABSORB_SECONDS = 300
 # Após um evento, a mesma câmera não gera outro antes disto
-SURFACE_EVENT_COOLDOWN_SECONDS = int(os.getenv("SURFACE_EVENT_COOLDOWN_SECONDS", "120"))
+SURFACE_EVENT_COOLDOWN_SECONDS = int(os.getenv("SURFACE_EVENT_COOLDOWN_SECONDS", "1800"))
+# Pixel alterado precisa estar parado (sem movimento) por este tempo
+SURFACE_STILL_SECONDS = float(os.getenv("SURFACE_STILL_SECONDS", "15"))
 # Clipe de evidência: segundos antes do início da mudança e após a confirmação
 EVIDENCE_PRE_SECONDS = float(os.getenv("EVIDENCE_PRE_SECONDS", "15"))
 EVIDENCE_POST_SECONDS = float(os.getenv("EVIDENCE_POST_SECONDS", "5"))
@@ -160,16 +175,16 @@ POSE_KEYPOINT_CONF = 0.35
 # lado tem os pés no chão, perto da base.
 CLIMB_FOOT_MIN_HEIGHT = 0.2
 
-# "Em cima da estátua" só vira ALTO depois de confirmado por este tempo
-# (com os DOIS tornozelos acima da base). Um frame só costuma ser perna
-# cruzada de quem está sentado no banco ou alguém atrás da estátua.
-CLIMB_CONFIRM_SECONDS = float(os.getenv("CLIMB_CONFIRM_SECONDS", "5"))
+# "Em cima da estátua" só vira ALTO depois de a MESMA pessoa ficar em pé
+# (pernas esticadas, os dois pés acima da base) por este tempo. Sentar no
+# banco nunca conta, por mais tempo que seja.
+CLIMB_CONFIRM_SECONDS = float(os.getenv("CLIMB_CONFIRM_SECONDS", "20"))
 # Falha de detecção por até este tempo não zera a contagem (pose pisca)
-INTERACTION_GRACE_SECONDS = 3
+INTERACTION_GRACE_SECONDS = 5
 
-# Mão na área sensível (cabeça/óculos/violão) detectada em prints
-# seguidos por pelo menos este tempo → sobe de MODERADO para ALTO.
-INTERACTION_ESCALATE_SECONDS = 30
+# Mão na área sensível (cabeça/óculos/violão) da MESMA pessoa por pelo menos
+# este tempo → ALTO. Pose pra foto (abraço, mão no ombro) dura segundos.
+INTERACTION_ESCALATE_SECONDS = float(os.getenv("INTERACTION_ESCALATE_SECONDS", "90"))
 
 # Mudança física no contorno da estátua até este tempo depois de uma
 # interação → CRÍTICO (possível retirada de peça/dano).
@@ -189,8 +204,8 @@ SSIM_INCREASE_ALTO = float(os.getenv("SSIM_INCREASE_ALTO", "10"))
 SSIM_INCREASE_CRITICO = float(os.getenv("SSIM_INCREASE_CRITICO", "20"))
 # O salto precisa se repetir em N comparações seguidas cobrindo pelo menos
 # X segundos: gente/sombra passa, peça faltando ou tinta ficam.
-SSIM_CONFIRM_CHECKS = int(os.getenv("SSIM_CONFIRM_CHECKS", "3"))
-SSIM_CONFIRM_SECONDS = float(os.getenv("SSIM_CONFIRM_SECONDS", "60"))
+SSIM_CONFIRM_CHECKS = int(os.getenv("SSIM_CONFIRM_CHECKS", "4"))
+SSIM_CONFIRM_SECONDS = float(os.getenv("SSIM_CONFIRM_SECONDS", "300"))
 # Comparações "normais" usadas na linha de base
 SSIM_BASELINE_WINDOW = 10
 

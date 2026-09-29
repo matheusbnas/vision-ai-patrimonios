@@ -24,6 +24,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from app.config import LIVE_ANALYSIS_FPS, SURFACE_STILL_SECONDS
+
 # Largura do recorte da superfície usada na comparação (px)
 WORK_WIDTH = 160
 # Distância de cor (Lab ponderado) acima da qual o pixel está diferente
@@ -46,6 +48,13 @@ OCCLUDER_MARGIN = 6
 HALO_SIDE = 0.25
 HALO_TOP = 0.1
 HALO_BOTTOM = 0.35
+# Mudança "parada": o pixel alterado também precisa estar sem movimento
+# (quase igual ao frame anterior) por STILL_FRAMES análises seguidas. Tinta
+# ou peça faltando não se mexem; pessoa que o YOLO não detectou (vendedor
+# com carrinho na frente da estátua) e falha de transmissão (blocos
+# borrados) mexem — e deixam de contar.
+MOTION_THRESHOLD = 12.0
+STILL_FRAMES = max(int(round(SURFACE_STILL_SECONDS * LIVE_ANALYSIS_FPS)), 2)
 
 
 class SurfaceMonitor:
@@ -53,13 +62,15 @@ class SurfaceMonitor:
         self.bg: Optional[np.ndarray] = None          # fundo Lab float32
         self.seen: Optional[np.ndarray] = None        # pixel já observado sem oclusão
         self.count: Optional[np.ndarray] = None       # análises seguidas diferente
+        self.still: Optional[np.ndarray] = None       # análises seguidas sem movimento
+        self.prev: Optional[np.ndarray] = None        # Lab da análise anterior
         self.box: Optional[tuple] = None              # contorno usado (reinicia se mudar)
         self._absorb_next = False
-        self.last: dict = {"change_frac": 0.0, "clear_change_frac": 0.0, "visible_frac": 0.0,
-                           "mask": None, "bbox": None}
+        self.last: dict = {"change_frac": 0.0, "clear_change_frac": 0.0, "stable_change_frac": 0.0,
+                           "visible_frac": 0.0, "mask": None, "bbox": None}
 
     def reset(self):
-        self.bg = self.seen = self.count = None
+        self.bg = self.seen = self.count = self.still = self.prev = None
 
     def absorb(self):
         """Incorpora o estado atual ao fundo (após o alerta ser registrado)."""
@@ -110,9 +121,21 @@ class SurfaceMonitor:
             self.bg = lab.copy()
             self.seen = visible.copy()
             self.count = np.zeros(lab.shape[:2], np.uint8)
-            self.last = {"change_frac": 0.0, "clear_change_frac": 0.0, "visible_frac": visible_frac,
-                         "mask": None, "bbox": None}
+            self.still = np.zeros(lab.shape[:2], np.uint16)
+            self.prev = lab
+            self.last = {"change_frac": 0.0, "clear_change_frac": 0.0, "stable_change_frac": 0.0,
+                         "visible_frac": visible_frac, "mask": None, "bbox": None}
             return self.last
+
+        # Movimento em relação à análise anterior (mesmo peso de cor da comparação)
+        mv = lab - self.prev
+        moving = np.sqrt((L_WEIGHT * mv[..., 0]) ** 2 + mv[..., 1] ** 2 + mv[..., 2] ** 2) > MOTION_THRESHOLD
+        # Só onde está visível: pixel encoberto por alguém mantém a contagem
+        # (a pessoa se mexendo na frente não é movimento da estátua)
+        calm, moved = visible & ~moving, visible & moving
+        self.still[calm] = np.minimum(self.still[calm].astype(np.int32) + 1, 65535)
+        self.still[moved] = 0
+        self.prev = lab
 
         if self._absorb_next:
             self.bg[visible] = lab[visible]
@@ -149,6 +172,8 @@ class SurfaceMonitor:
 
         change_frac = float(changed[valid].mean()) if valid.any() else 0.0
         clear_change_frac = float((changed & ~halo)[valid].mean()) if valid.any() else 0.0
+        stable_change_frac = float((changed & ~halo & (self.still >= STILL_FRAMES))[valid].mean()) \
+            if valid.any() else 0.0
         mask = bbox = None
         if changed.any():
             mask = cv2.resize(changed.astype(np.uint8), (x2 - x1, y2 - y1),
@@ -156,5 +181,6 @@ class SurfaceMonitor:
             ys, xs = np.nonzero(mask)
             bbox = [int(x1 + xs.min()), int(y1 + ys.min()), int(x1 + xs.max()), int(y1 + ys.max())]
         self.last = {"change_frac": round(change_frac, 4), "clear_change_frac": round(clear_change_frac, 4),
+                     "stable_change_frac": round(stable_change_frac, 4),
                      "visible_frac": round(visible_frac, 3), "mask": mask, "bbox": bbox}
         return self.last
