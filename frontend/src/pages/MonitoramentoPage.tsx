@@ -1201,16 +1201,16 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                             </div>
                           </div>
                           <p className="mt-1 text-[9px] text-gray-500 text-center">
-                            {frame.compared_area === 'figura da estátua'
-                              ? 'Comparação só na figura da estátua (sem banco, chão e fundo), sem as pessoas na frente'
-                              : 'Comparação no contorno calibrado (estátua não reconhecida na referência), sem as pessoas na frente'}
+                            {frame.compared_area === 'silhueta da estátua'
+                              ? 'Comparação só na silhueta da estátua (sem banco, chão e fundo), com a imagem alinhada à referência e sem quem está na frente'
+                              : 'Comparação no contorno calibrado (estátua não reconhecida na referência), sem quem está na frente'}
                           </p>
                           {frame.reference_roi_base64 && frame.current_roi_base64 && (
                             <div className="mt-2 grid grid-cols-3 gap-1.5">
                               {[
                                 { src: frame.reference_roi_base64, label: `Referência${frame.reference_time ? ` · ${new Date(frame.reference_time * 1000).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : ''}` },
                                 { src: frame.current_roi_base64, label: 'Agora' },
-                                { src: frame.highlight_image_base64, label: 'Diferenças (vermelho)' },
+                                { src: frame.highlight_image_base64, label: 'Alterado (vermelho) · encoberto (azul)' },
                               ].map((im) => im.src && (
                                 <figure
                                   key={im.label}

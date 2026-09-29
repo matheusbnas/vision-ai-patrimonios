@@ -28,7 +28,7 @@ from app.config import (
     SSIM_CONFIRM_SECONDS,
     SSIM_BASELINE_WINDOW,
 )
-from app.models import interaction
+from app.models import interaction, statue_compare
 from app.services import zone_service
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,16 @@ FIGURE_PAD = 0.04
 # cor Lab acima disto (tinta), já descontada a variação global de luz
 SSIM_PIXEL_DIFF = 0.45
 COLOR_PIXEL_DIFF = 28.0
+# Borda tirada da silhueta da estátua (fração da altura dela): o alinhamento
+# nunca é perfeito ao pixel e a borda contra o fundo viraria diferença
+SILHOUETTE_ERODE = 0.015
+# Folga em volta da silhueta de quem está na frente (cabelo, braço, sombra)
+PERSON_MASK_PAD = 0.04
+# Comparações seguidas sem conseguir alinhar → a câmera mudou de posição:
+# a referência é descartada e refeita (com a estátua livre)
+REALIGN_RESET_CHECKS = 5
+# Menor mancha de alteração que conta (fração da silhueta visível)
+MIN_CHANGE_BLOB = 0.004
 
 
 def _b64(img_rgb: np.ndarray) -> str:
@@ -141,9 +151,9 @@ class ChangeDetector:
         """
         Define a imagem de referência do monumento.
 
-        A área comparada daqui em diante é a FIGURA da estátua nesta imagem
-        (detecção reconhecida como a estátua, dentro do contorno calibrado).
-        Sem a estátua reconhecida, cai no contorno calibrado inteiro.
+        Guarda o frame inteiro (pra alinhar as próximas imagens) e a
+        SILHUETA da estátua (segmentação) — a comparação acontece só dentro
+        dela. Sem a estátua reconhecida, usa o contorno calibrado inteiro.
         objects: detecções do YOLO deste frame; se None e houver det_service,
         roda a detecção aqui.
         """
@@ -154,6 +164,26 @@ class ChangeDetector:
                 logger.warning(f"YOLO na referência: {e}")
         figure = figure_box_frac(frame, camera_code, objects)
         area = _frac_px(figure, frame) if figure else _zone_rect_px(frame, camera_code)
+
+        # Silhueta da estátua (a figura de bronze, sem banco/chão/fundo)
+        silhouette = None
+        statue_boxes = [d["bbox"] for d in (objects or []) if d.get("is_statue")]
+        if statue_boxes:
+            box = max(statue_boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+            silhouette = statue_compare.statue_silhouette(frame, box)
+        if silhouette is None:
+            silhouette = np.zeros(frame.shape[:2], bool)
+            silhouette[area[1]:area[3], area[0]:area[2]] = True
+            mode = "contorno calibrado"
+        else:
+            # Tira a borda: alinhamento nunca é perfeito ao pixel, e a borda
+            # da figura contra o fundo viraria "diferença"
+            k = max(int((area[3] - area[1]) * SILHOUETTE_ERODE), 1)
+            silhouette = cv2.erode(silhouette.astype(np.uint8), np.ones((k, k), np.uint8)).astype(bool)
+            ys, xs = np.nonzero(silhouette)
+            area = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+            mode = "silhueta da estátua"
+
         roi = frame[area[1]:area[3], area[0]:area[2]]
         hf_result = None
         if det_service and det_service.hf_vandalism.model_loaded:
@@ -164,7 +194,11 @@ class ChangeDetector:
 
         self.monitored[camera_code] = {
             "reference_image": roi,
-            # Área comparada (frações): figura da estátua, ou None = contorno
+            "reference_frame": frame.copy(),
+            "reference_gray": cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY),
+            "silhouette": silhouette,
+            "area": area,
+            "compared_area": mode,
             "figure_frac": figure,
             "reference_time": time.time(),
             "last_check": time.time(),
@@ -173,177 +207,156 @@ class ChangeDetector:
             "baseline": [],
             # comparações seguidas com salto ALTO+: [(timestamp, nível)]
             "streak": [],
+            # comparações seguidas sem conseguir alinhar (câmera mudou de posição)
+            "misaligned": 0,
         }
-        logger.info(f"Referência definida para câmera {camera_code}")
+        logger.info(f"Referência definida para câmera {camera_code} ({mode})")
         return {
             "success": True,
             "camera_code": camera_code,
             "timestamp": time.time(),
             "reference_hf": hf_result,
-            "compared_area": "figura da estátua" if figure else "contorno calibrado",
+            "compared_area": mode,
         }
 
     def check(self, camera_code: str, current_frame: np.ndarray,
               det_service=None, ignore_boxes: Optional[list] = None) -> dict:
         """
-        Compara o frame atual com a referência.
+        Compara o frame atual com a referência — SÓ na silhueta da estátua.
 
-        Args:
-            camera_code: Código da câmera
-            current_frame: Frame atual (numpy RGB)
-            det_service: Opcional, para HF model
-            ignore_boxes: Opcional, bboxes [x1,y1,x2,y2] (coords do frame
-                original) de elementos passageiros (pessoas, veículos)
-                detectados pelo YOLO — ver TRANSIENT_CLASSES. Essas áreas
-                são excluídas do cálculo de alteração — alguém passando ou
-                um carro na rua não pode contar como dano/pichação no
-                monumento.
-
-        Returns:
-            dict: Resultado com SSIM, mudanças, alerta, HF
+          1. alinha a imagem atual ao enquadramento da referência (a câmera
+             mexe posição/zoom); se não der, pula (e depois de várias vezes
+             seguidas descarta a referência pra ser refeita);
+          2. tira da conta tudo que está NA FRENTE da estátua: pessoas
+             (silhueta segmentada, com folga) e as caixas em ignore_boxes
+             (veículos etc.);
+          3. mede, dentro da silhueta visível, a área com estrutura
+             diferente (peça faltando, quebra) ou cor diferente (tinta).
         """
         if camera_code not in self.monitored:
             return {"success": False, "error": "Câmera não monitorada. Defina referência primeiro."}
 
         ref_data = self.monitored[camera_code]
+        if "reference_frame" not in ref_data:  # referência antiga (antes da silhueta): refaz
+            self.monitored.pop(camera_code, None)
+            return {"success": False, "error": "Referência antiga descartada — será recriada"}
         ref_img = ref_data["reference_image"]
-
-        # Mesma área da referência: a figura da estátua (ou o contorno)
+        ref_frame = ref_data["reference_frame"]
+        silhouette = ref_data["silhouette"]
         figure = ref_data.get("figure_frac")
-        zx1, zy1, zx2, zy2 = (_frac_px(figure, current_frame) if figure
-                              else _zone_rect_px(current_frame, camera_code))
+        zx1, zy1, zx2, zy2 = ref_data["area"]
+        h, w = ref_frame.shape[:2]
+        if current_frame.shape[:2] != (h, w):
+            current_frame = cv2.resize(current_frame, (w, h))
 
-        # Estátua encoberta por gente/veículo: a comparação desse print não
-        # é confiável (a diferença seria a pessoa, não a estátua) — pula.
-        covered = covered_fraction(current_frame, camera_code, ignore_boxes, (zx1, zy1, zx2, zy2))
-        if covered >= STATUE_OCCLUSION_SKIP:
-            return {
-                "success": False,
-                "skipped": True,
-                "error": f"Monumento {covered*100:.0f}% encoberto por pessoas/veículos — comparação pulada neste print",
-            }
+        # ─── 1. Alinhamento com a referência ───────────────────────
+        M, align_info = statue_compare.align(ref_data["reference_gray"],
+                                             cv2.cvtColor(current_frame, cv2.COLOR_RGB2GRAY),
+                                             (zx1, zy1, zx2, zy2))
+        if M is None:
+            ref_data["misaligned"] = ref_data.get("misaligned", 0) + 1
+            if ref_data["misaligned"] >= REALIGN_RESET_CHECKS:
+                logger.info(f"[{camera_code}] enquadramento mudou em {REALIGN_RESET_CHECKS} comparações "
+                            f"seguidas — referência descartada, será recriada")
+                self.monitored.pop(camera_code, None)
+            return {"success": False, "skipped": True,
+                    "error": f"Comparação pulada: {align_info.get('reason')} "
+                             f"({ref_data['misaligned']}/{REALIGN_RESET_CHECKS} até refazer a referência)"}
+        ref_data["misaligned"] = 0
+        warped = cv2.warpAffine(current_frame, M, (w, h), flags=cv2.INTER_LINEAR)
+        in_view = cv2.warpAffine(np.ones((h, w), np.uint8), M, (w, h), flags=cv2.INTER_NEAREST) > 0
 
-        current_roi = current_frame[zy1:zy2, zx1:zx2]
-        crop_h, crop_w = current_roi.shape[:2]
-        current_roi = cv2.resize(current_roi, (ref_img.shape[1], ref_img.shape[0]))
-        resized_h, resized_w = ref_img.shape[0], ref_img.shape[1]
-        scale_x = resized_w / crop_w if crop_w else 1.0
-        scale_y = resized_h / crop_h if crop_h else 1.0
+        # ─── 2. O que está na frente da estátua (não conta) ─────────
+        front = np.zeros((h, w), np.uint8)
+        pad = max(int((zy2 - zy1) * PERSON_MASK_PAD), 3)
+        for box, mk in statue_compare.people_masks(current_frame):
+            mk_ref = cv2.warpAffine(mk.astype(np.uint8), M, (w, h), flags=cv2.INTER_NEAREST) > 0
+            if statue_compare.mask_iou(mk_ref, silhouette) >= 0.6:
+                continue  # é a própria estátua
+            front |= cv2.dilate(mk_ref.astype(np.uint8), np.ones((pad, pad), np.uint8))
+        # Caixas do YOLO (pessoas, veículos) também saem da conta, no
+        # enquadramento da referência — só reduzem a área comparada
+        ignored_count = 0
+        for (px1, py1, px2, py2) in ignore_boxes or []:
+            pts = cv2.transform(np.float32([[[px1, py1]], [[px2, py1]], [[px1, py2]], [[px2, py2]]]), M).reshape(-1, 2)
+            bx1, by1 = np.clip(pts.min(axis=0).astype(int), 0, [w, h])
+            bx2, by2 = np.clip(pts.max(axis=0).astype(int), 0, [w, h])
+            if bx2 <= bx1 or by2 <= by1 or not silhouette[by1:by2, bx1:bx2].any():
+                continue
+            ignored_count += 1
+            front[by1:by2, bx1:bx2] = 1
+        front = front.astype(bool)
 
-        # ─── 1. SSIM entre ROI de referência e ROI atual ───────────
+        sil = silhouette[zy1:zy2, zx1:zx2]
+        visible = sil & ~front[zy1:zy2, zx1:zx2] & in_view[zy1:zy2, zx1:zx2]
+        visible_frac = visible.sum() / max(sil.sum(), 1)
+        visible_pct = visible_frac * 100
+        if visible_frac < 1 - STATUE_OCCLUSION_SKIP:
+            return {"success": False, "skipped": True,
+                    "error": f"Estátua {100 - visible_pct:.0f}% encoberta por pessoas/veículos — comparação pulada neste print"}
+
+        current_roi = warped[zy1:zy2, zx1:zx2]
+
+        # ─── 3. Diferença dentro da silhueta visível ─────────────────
         gray_ref = cv2.cvtColor(ref_img, cv2.COLOR_RGB2GRAY)
         gray_cur = cv2.cvtColor(current_roi, cv2.COLOR_RGB2GRAY)
-
-        # Normaliza iluminação (CLAHE) para evitar falso-positivo por luz do dia
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        gray_ref = clahe.apply(gray_ref)
-        gray_cur = clahe.apply(gray_cur)
+        gray_ref = cv2.GaussianBlur(clahe.apply(gray_ref), (3, 3), 0)
+        gray_cur = cv2.GaussianBlur(clahe.apply(gray_cur), (3, 3), 0)
+        _, ssim_map = ssim(gray_ref, gray_cur, full=True, data_range=255)
 
-        # Aplica blur leve para reduzir ruído de compressão
-        gray_ref = cv2.GaussianBlur(gray_ref, (3, 3), 0)
-        gray_cur = cv2.GaussianBlur(gray_cur, (3, 3), 0)
-
-        score, ssim_map = ssim(gray_ref, gray_cur, full=True, data_range=255)
-
-        # Pixel alterado = ESTRUTURA diferente (peça faltando, quebra, risco:
-        # SSIM local baixo) OU COR diferente (tinta/pichação: a forma pode
-        # continuar igual). A cor desconta a variação global de luz (sol/nuvem).
-        # (Antes: (1 - ssim).astype(uint8) arredondava pra 0/1 antes de
-        # escalar — só pixel com estrutura totalmente invertida contava.)
+        # Pixel alterado = ESTRUTURA diferente (peça faltando, quebra, risco)
+        # OU COR diferente (tinta/pichação), descontada a variação de luz
         struct_changed = (1 - ssim_map) > SSIM_PIXEL_DIFF
         lab_ref = cv2.cvtColor(cv2.GaussianBlur(ref_img, (5, 5), 0), cv2.COLOR_RGB2LAB).astype(np.float32)
         lab_cur = cv2.cvtColor(cv2.GaussianBlur(current_roi, (5, 5), 0), cv2.COLOR_RGB2LAB).astype(np.float32)
         dlab = lab_cur - lab_ref
-        dlab[..., 0] -= float(np.median(dlab[..., 0]))
+        dlab[..., 0] -= float(np.median(dlab[..., 0][visible])) if visible.any() else 0.0
         color_changed = np.sqrt((0.5 * dlab[..., 0]) ** 2 + dlab[..., 1] ** 2 + dlab[..., 2] ** 2) > COLOR_PIXEL_DIFF
-        thresh = ((struct_changed | color_changed).astype(np.uint8)) * 255
+        changed = (struct_changed | color_changed) & visible
         kernel = np.ones((5, 5), np.uint8)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        thresh = cv2.morphologyEx(changed.astype(np.uint8) * 255, cv2.MORPH_OPEN, kernel)
+        thresh[~visible] = 0
 
-        # ─── Ignora áreas passageiras (YOLO: pessoas/veículos) no cálculo ──
-        # Alguém passando ou um carro na rua muda pixels no ROI, mas isso
-        # não é dano/pichação — apaga essas regiões do mapa de diff antes
-        # de contar % alterado e regiões, e conta separadamente.
-        ignored_count = 0
-        visible = np.ones(thresh.shape[:2], bool)   # parte da estátua sem ninguém na frente
-        if ignore_boxes:
-            for (px1, py1, px2, py2) in ignore_boxes:
-                ix1, iy1 = max(px1, zx1), max(py1, zy1)
-                ix2, iy2 = min(px2, zx2), min(py2, zy2)
-                if ix2 <= ix1 or iy2 <= iy1:
-                    continue  # fora da zona do monumento
-                ignored_count += 1
-                rx1 = int((ix1 - zx1) * scale_x)
-                ry1 = int((iy1 - zy1) * scale_y)
-                rx2 = int((ix2 - zx1) * scale_x)
-                ry2 = int((iy2 - zy1) * scale_y)
-                cv2.rectangle(thresh, (rx1, ry1), (rx2, ry2), 0, -1)
-                visible[max(ry1, 0):max(ry2, 0), max(rx1, 0):max(rx2, 0)] = False
-
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        # Tudo medido só na área CALIBRADA da estátua (o recorte comparado é
-        # o contorno) e só na parte VISÍVEL dela (sem pessoas/veículos na
-        # frente) — pessoa na frente não é mudança na estátua.
-        total_pixels = thresh.shape[0] * thresh.shape[1]
         visible_pixels = max(int(visible.sum()), 1)
-        visible_pct = visible_pixels / total_pixels * 100
-        changed_pixels = int(np.sum(thresh > 0))
-        change_pct = (changed_pixels / visible_pixels) * 100
-        # Semelhança com a referência na parte visível (a média do SSIM
-        # inteiro caía com gente/sombra na frente, sem nada ter mudado)
-        score = float(ssim_map[visible].mean())
+        score = float(ssim_map[visible].mean()) if visible.any() else 1.0
 
-        # Regiões de mudança significativa (área mínima maior para filtrar ruído)
+        # Só conta MANCHA de tamanho relevante: dano (tinta, peça faltando)
+        # forma uma área contínua; pontinhos espalhados são ruído de
+        # compressão e reflexo de sol no bronze
+        min_blob = max(150, int(visible_pixels * MIN_CHANGE_BLOB))
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = [c for c in contours if cv2.contourArea(c) >= min_blob]
+        kept = np.zeros_like(thresh)
+        cv2.drawContours(kept, contours, -1, 255, -1)
+        thresh = np.where(visible, kept & thresh, 0).astype(np.uint8)
+        change_pct = int((thresh > 0).sum()) / visible_pixels * 100
+
         changes = []
         for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area > 300:  # ignora ruídos muito pequenos
-                x, y, w, h = cv2.boundingRect(cnt)
-                changes.append({
-                    "bbox": [int(x), int(y), int(x + w), int(y + h)],
-                    "area_pixels": int(area),
-                    "area_percent": round((area / total_pixels) * 100, 3),
-                })
+            a = cv2.contourArea(cnt)
+            if a >= min_blob:
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                changes.append({"bbox": [int(x), int(y), int(x + bw), int(y + bh)], "area_pixels": int(a),
+                                "area_percent": round(a / visible_pixels * 100, 3)})
 
-        # Gera imagem highlight (diferenças em vermelho no ROI)
+        # Imagem das diferenças: fora da silhueta escurecido, encoberto em
+        # azul, alterado em vermelho
         highlight = current_roi.copy()
-        overlay = highlight.copy()
-        overlay[thresh > 0] = [255, 0, 0]
-        highlight = cv2.addWeighted(overlay, 0.4, highlight, 0.6, 0)
+        highlight[~sil] = (highlight[~sil] * 0.35).astype(np.uint8)
+        hidden = sil & ~visible
+        highlight[hidden] = (0.5 * highlight[hidden] + 0.5 * np.array([60, 120, 255])).astype(np.uint8)
+        red = thresh > 0
+        highlight[red] = (0.4 * highlight[red] + 0.6 * np.array([255, 0, 0])).astype(np.uint8)
         for ch in changes:
             x1, y1, x2, y2 = ch["bbox"]
-            cv2.rectangle(highlight, (x1, y1), (x2, y2), (0, 0, 255), 2)
-            cv2.putText(highlight, f"{ch['area_percent']:.1f}%",
-                        (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4, (0, 0, 255), 1)
-
-        # Marca (em azul) os elementos passageiros ignorados no diff, pra
-        # deixar claro pro operador por que aquela área não entrou na % alterado
-        if ignore_boxes:
-            for (px1, py1, px2, py2) in ignore_boxes:
-                ix1, iy1 = max(px1, zx1), max(py1, zy1)
-                ix2, iy2 = min(px2, zx2), min(py2, zy2)
-                if ix2 <= ix1 or iy2 <= iy1:
-                    continue
-                rx1 = int((ix1 - zx1) * scale_x)
-                ry1 = int((iy1 - zy1) * scale_y)
-                rx2 = int((ix2 - zx1) * scale_x)
-                ry2 = int((iy2 - zy1) * scale_y)
-                cv2.rectangle(highlight, (rx1, ry1), (rx2, ry2), (255, 180, 0), 2)
-                cv2.putText(highlight, "ignorado", (rx1, max(ry1 - 5, 0)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 180, 0), 1)
+            cv2.rectangle(highlight, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
         ignored_alert = None
-        if ignored_count > 0:
+        if hidden.any():
             ignored_alert = {
                 "level": "INFO",
-                "message": (
-                    f"👤🚗 {ignored_count} elemento(s) passageiro(s) "
-                    f"(pessoas/veículos) perto do monumento "
-                    f"(área ignorada na comparação de alteração)"
-                ),
+                "message": f"👤 {100 - visible_pct:.0f}% da estátua encoberta por pessoas/objetos (fora da comparação)",
                 "count": ignored_count,
             }
 
@@ -471,7 +484,8 @@ class ChangeDetector:
             # Lado a lado: a mesma área na referência e agora
             "reference_roi_base64": _b64(ref_img),
             "current_roi_base64": _b64(current_roi),
-            "compared_area": "figura da estátua" if figure else "contorno calibrado",
+            "compared_area": ref_data.get("compared_area", "contorno calibrado"),
+            "alignment": align_info,
             "reference_time": ref_data.get("reference_time"),
             "history_count": len(self.change_history[camera_code]),
         }

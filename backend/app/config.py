@@ -168,6 +168,9 @@ STATUE_SELF_IOU = 0.5
 # YOLO26-pose (keypoints: mãos, quadril, pés) — baixado automaticamente
 # pelo ultralytics na primeira execução (~6 MB).
 POSE_MODEL = os.getenv("POSE_MODEL", str(BASE_DIR.parent / "yolo26n-pose.pt"))
+# YOLO26-seg (máscaras): silhueta exata da estátua e de quem está na frente
+# na comparação com a referência — baixado automaticamente (~6 MB).
+SEG_MODEL = os.getenv("SEG_MODEL", str(BASE_DIR.parent / "yolo26n-seg.pt"))
 POSE_KEYPOINT_CONF = 0.35
 
 # Pés acima desta fração da altura do contorno (medida a partir da base)
