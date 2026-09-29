@@ -47,6 +47,7 @@ from app.config import (
     SURFACE_SUSPECT_SECONDS,
     SURFACE_SUSPECT_MEMORY_SECONDS,
     SURFACE_CHANGE_MIN_FRAC,
+    SURFACE_CRITICAL_FRAC,
     SURFACE_CHANGE_CONFIRM_SECONDS,
     SURFACE_UNATTRIBUTED_ABSORB_SECONDS,
     SURFACE_EVENT_COOLDOWN_SECONDS,
@@ -350,6 +351,7 @@ class LiveAnalyzer:
                 "surface": {
                     "calibrated": surface_px is not None,
                     "change_frac": surface["change_frac"] if surface else None,
+                    "clear_change_frac": surface.get("clear_change_frac") if surface else None,
                     "visible_frac": surface["visible_frac"] if surface else None,
                 },
                 "suspects": sorted(cam.recent_suspects),
@@ -382,7 +384,10 @@ class LiveAnalyzer:
         if surface is None:
             return None
 
-        changed = surface["change_frac"] >= SURFACE_CHANGE_MIN_FRAC
+        # Só a mudança fora do halo de quem está na frente confirma: sombra,
+        # mochila e perna de turista sentado ao lado ficam de fora
+        clear_frac = surface.get("clear_change_frac", surface["change_frac"])
+        changed = clear_frac >= SURFACE_CHANGE_MIN_FRAC
         if not changed:
             cam.change_since = None
             if surface["visible_frac"] >= BEFORE_MIN_VISIBLE and surface["change_frac"] == 0:
@@ -405,11 +410,12 @@ class LiveAnalyzer:
             return None
 
         # ─── Confirma o evento ───────────────────────────────────────
-        pct = round(surface["change_frac"] * 100, 1)
+        pct = round(clear_frac * 100, 1)
         ids = ", ".join(f"#{i}" for i in suspects)
+        level = "CRÍTICO" if clear_frac >= SURFACE_CRITICAL_FRAC else "ALTO"
         alert = {
-            "level": "CRÍTICO",
-            "message": (f"🎨 Possível pichação/alteração na superfície protegida ({pct}% alterado) "
+            "level": level,
+            "message": (f"🎨 {level}: Possível pichação/alteração na superfície protegida ({pct}% alterado) "
                         f"com pessoa suspeita {ids} junto — requer validação humana"),
         }
         event_id = datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S")

@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from app.services.camera_service import CameraService
 from app.services.detection_service import DetectionService
 from app.services import zone_service, alert_service
-from app.models.change_detector import ChangeDetector
+from app.models.change_detector import ChangeDetector, covered_fraction
 from app.config import IMAGES_DIR, TRANSIENT_CLASSES
 from app.schemas.schemas import ZoneInput, StatueInput
 
@@ -906,16 +906,15 @@ async def set_reference(
             except Exception:
                 pass
 
-    frame_real = frame is not None  # guarda se é frame real antes do fallback
     if frame is None:
-        # Fallback: gera frame com desenho do monumento pra demo
-        logger.warning(f"Não foi possível capturar frame da câmera {camera_code}, usando demo")
-        frame = _create_monument_frame()
+        # Sem fallback pra cena de demonstração: referência sintética faria
+        # todo print real seguinte parecer "monumento alterado"
+        logger.warning(f"Não foi possível capturar frame da câmera {camera_code} — referência não alterada")
+        return {"success": False, "error": "Não foi possível capturar a câmera — referência não alterada"}
 
-    # 📸 Salva snapshot da referência em assets/images/ (só se for frame real)
-    if frame_real:
-        camera_name_clean = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
-        save_camera_snapshot(frame, camera_code, camera_name_clean, "referencia")
+    # 📸 Salva snapshot da referência em assets/images/
+    camera_name_clean = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
+    save_camera_snapshot(frame, camera_code, camera_name_clean, "referencia")
 
     result = change_detector.set_reference(camera_code, frame, detection_service)
 
@@ -950,22 +949,6 @@ async def detect_changes(
     if not detection_service or not camera_service:
         raise HTTPException(status_code=500, detail="Serviço não inicializado")
 
-    # Se não tem referência, cria automaticamente
-    if camera_code not in change_detector.monitored:
-        # Tenta capturar frame pra referência
-        ref_frame = None
-        camera = camera_service.get_camera_by_code(camera_code)
-        if camera:
-            stream_url = camera.get("stream_url") or camera_service.get_stream_url(camera_code)
-            if stream_url:
-                try:
-                    ref_frame = await run_in_threadpool(get_frame, stream_url, camera_code)
-                except Exception:
-                    pass
-        if ref_frame is None:
-            ref_frame = _create_monument_frame()
-        change_detector.set_reference(camera_code, ref_frame, detection_service)
-
     # Captura frame atual pra comparação
     current_frame = None
     camera = camera_service.get_camera_by_code(camera_code)
@@ -977,14 +960,14 @@ async def detect_changes(
             except Exception:
                 pass
 
-    frame_real = current_frame is not None  # guarda se é frame real antes do fallback
+    # Sem frame real não compara: a cena de demonstração contra a referência
+    # real (ou o contrário) dava "monumento X% alterado" falso
     if current_frame is None:
-        current_frame = _create_monument_frame()
+        return {"success": False, "error": "Não foi possível capturar a câmera — comparação não realizada"}
 
-    # 📸 Salva snapshot da comparação em assets/images/ (só se for frame real)
-    if frame_real:
-        camera_name_comp = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
-        save_camera_snapshot(current_frame, camera_code, camera_name_comp, "comparacao")
+    # 📸 Salva snapshot da comparação em assets/images/
+    camera_name_comp = camera.get("name", f"Câmera {camera_code}") if camera else f"Câmera {camera_code}"
+    save_camera_snapshot(current_frame, camera_code, camera_name_comp, "comparacao")
 
     # Detecta elementos passageiros (pessoas/veículos, YOLO) no frame atual
     # pra excluir essas áreas do cálculo de % alterado — alguém passando ou
@@ -998,6 +981,14 @@ async def detect_changes(
         ]
     except Exception as e:
         logger.warning(f"Erro YOLO (elementos passageiros) no change detection: {e}")
+
+    # Sem referência: cria com este frame, mas só com a estátua livre — uma
+    # referência com turista na frente faria todo print seguinte parecer alterado
+    if camera_code not in change_detector.monitored:
+        if covered_fraction(current_frame, camera_code, ignore_boxes) >= 0.05:
+            return {"success": False, "error": "Aguardando o monumento ficar livre de pessoas para criar a referência"}
+        change_detector.set_reference(camera_code, current_frame, detection_service)
+        return {"success": False, "error": "Referência criada — a comparação começa no próximo ciclo"}
 
     result = change_detector.check(camera_code, current_frame, detection_service, ignore_boxes=ignore_boxes)
     if not result.get("success"):
@@ -1015,6 +1006,7 @@ async def detect_changes(
         "change_regions": result["change_regions"],
         "significant_changes": result["significant_changes"],
         "ssim_alert_level": result["ssim_alert_level"],
+        "confirmation": result["confirmation"],
         "hf_prediction": result["hf_prediction"],
         "alert": result["alert"],
         "alert_level": result["alert_level"],

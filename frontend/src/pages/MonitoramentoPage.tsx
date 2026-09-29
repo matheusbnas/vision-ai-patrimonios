@@ -109,6 +109,15 @@ interface DetectionFrame {
   }
   alert_level?: string
   ssim_alert_level?: string
+  // Mudança física: aumento sobre o normal da câmera e confirmação em
+  // comparações seguidas (o alerta só sai com confirmed = true)
+  confirmation?: {
+    baseline_pct: number
+    increase_pct: number
+    checks: number
+    checks_needed: number
+    confirmed: boolean
+  }
   // Alerta preditivo do YOLO (objeto de risco dentro do quadrante do monumento)
   risk_alert?: {
     level: string
@@ -531,6 +540,7 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                 change_percentage: data.change_percentage,
                 change_regions: data.change_regions,
                 ssim_alert_level: data.ssim_alert_level,
+                confirmation: data.confirmation,
                 alert: data.alert || undefined,
                 alert_level: data.alert_level || existing.alert_level || 'NORMAL',
                 ignored_objects_count: data.ignored_objects_count,
@@ -743,6 +753,7 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                         change_regions: data.change_regions,
                         significant_changes: data.significant_changes,
                         ssim_alert_level: data.ssim_alert_level,
+                        confirmation: data.confirmation,
                         alert: data.alert || undefined,
                         alert_level: data.alert_level || 'NORMAL',
                         ignored_objects_count: data.ignored_objects_count,
@@ -1086,8 +1097,9 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                             </div>
                             <div>
                               <p className={`text-lg font-bold ${
-                                (frame.change_percentage || 0) > 3 ? 'text-red-600' :
-                                (frame.change_percentage || 0) > 0.5 ? 'text-yellow-600' :
+                                // Cor pelo AUMENTO sobre o normal da câmera (mesmo critério do alerta)
+                                (frame.confirmation?.increase_pct ?? frame.change_percentage ?? 0) >= 10 ? 'text-red-600' :
+                                (frame.confirmation?.increase_pct ?? frame.change_percentage ?? 0) >= 5 ? 'text-yellow-600' :
                                 'text-green-600'
                               }`}>
                                 {frame.change_percentage?.toFixed(1)}%
@@ -1099,6 +1111,18 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                               <p className="text-[8px] text-gray-500">Regiões</p>
                             </div>
                           </div>
+                          {frame.confirmation && (
+                            <p className="mt-1 text-[9px] text-gray-600 text-center">
+                              {frame.confirmation.increase_pct >= 0.1
+                                ? `+${frame.confirmation.increase_pct.toFixed(1)} p.p. sobre o normal (${frame.confirmation.baseline_pct.toFixed(1)}%)`
+                                : `Dentro do normal da câmera (${frame.confirmation.baseline_pct.toFixed(1)}%)`}
+                              {frame.confirmation.checks > 0 && !frame.confirmation.confirmed && (
+                                <span className="ml-1 font-semibold text-amber-600">
+                                  · confirmando {frame.confirmation.checks}/{frame.confirmation.checks_needed}
+                                </span>
+                              )}
+                            </p>
+                          )}
                           {frame.significant_changes && frame.significant_changes.length > 0 && (
                             <div className="mt-1 border-t border-blue-100 pt-1 space-y-0.5">
                               {frame.significant_changes.slice(0, 3).map((ch, i) => (

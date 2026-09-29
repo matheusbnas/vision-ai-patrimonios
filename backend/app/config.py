@@ -85,10 +85,15 @@ LIVE_ANALYSIS_FPS = float(os.getenv("LIVE_ANALYSIS_FPS", "2"))
 SURFACE_SUSPECT_SECONDS = float(os.getenv("SURFACE_SUSPECT_SECONDS", "4"))
 # Uma mudança na superfície é associada a um suspeito visto até este tempo antes
 SURFACE_SUSPECT_MEMORY_SECONDS = float(os.getenv("SURFACE_SUSPECT_MEMORY_SECONDS", "60"))
-# Fração da superfície visível alterada de forma persistente pra contar como mudança
-SURFACE_CHANGE_MIN_FRAC = float(os.getenv("SURFACE_CHANGE_MIN_FRAC", "0.015"))
+# Fração da superfície visível alterada de forma persistente pra contar como
+# mudança. Só conta a mudança LONGE de quem está na frente (ver
+# SurfaceMonitor: sombra/mochila/roupa fora da caixa do YOLO ficam de fora).
+# 1,5% gerava alerta com turista sentado ao lado do Drummond.
+SURFACE_CHANGE_MIN_FRAC = float(os.getenv("SURFACE_CHANGE_MIN_FRAC", "0.03"))
+# A partir desta fração a alteração é CRÍTICO; entre MIN e isto, ALTO
+SURFACE_CRITICAL_FRAC = float(os.getenv("SURFACE_CRITICAL_FRAC", "0.08"))
 # Mudança sustentada por este tempo (com suspeito) → alerta
-SURFACE_CHANGE_CONFIRM_SECONDS = float(os.getenv("SURFACE_CHANGE_CONFIRM_SECONDS", "2"))
+SURFACE_CHANGE_CONFIRM_SECONDS = float(os.getenv("SURFACE_CHANGE_CONFIRM_SECONDS", "4"))
 # Mudança sem nenhum suspeito por este tempo é absorvida (mudança de cena,
 # objeto deixado) — não dispara depois quando alguém se aproximar
 SURFACE_UNATTRIBUTED_ABSORB_SECONDS = 60
@@ -155,6 +160,13 @@ POSE_KEYPOINT_CONF = 0.35
 # lado tem os pés no chão, perto da base.
 CLIMB_FOOT_MIN_HEIGHT = 0.2
 
+# "Em cima da estátua" só vira ALTO depois de confirmado por este tempo
+# (com os DOIS tornozelos acima da base). Um frame só costuma ser perna
+# cruzada de quem está sentado no banco ou alguém atrás da estátua.
+CLIMB_CONFIRM_SECONDS = float(os.getenv("CLIMB_CONFIRM_SECONDS", "5"))
+# Falha de detecção por até este tempo não zera a contagem (pose pisca)
+INTERACTION_GRACE_SECONDS = 3
+
 # Mão na área sensível (cabeça/óculos/violão) detectada em prints
 # seguidos por pelo menos este tempo → sobe de MODERADO para ALTO.
 INTERACTION_ESCALATE_SECONDS = 30
@@ -168,9 +180,26 @@ INTERACTION_MEMORY_SECONDS = 600
 # não confiável).
 STATUE_OCCLUSION_SKIP = 0.4
 
+# ─── Mudança física (SSIM) — critérios de alerta ─────────────────
+# O nível sai do AUMENTO sobre a linha de base (mediana das últimas
+# comparações normais), não do % bruto: sol/sombra mudam o % devagar ao
+# longo do dia e a linha de base acompanha; dano/pichação é um salto.
+SSIM_INCREASE_MODERADO = float(os.getenv("SSIM_INCREASE_MODERADO", "5"))   # pontos percentuais
+SSIM_INCREASE_ALTO = float(os.getenv("SSIM_INCREASE_ALTO", "10"))
+SSIM_INCREASE_CRITICO = float(os.getenv("SSIM_INCREASE_CRITICO", "20"))
+# O salto precisa se repetir em N comparações seguidas cobrindo pelo menos
+# X segundos: gente/sombra passa, peça faltando ou tinta ficam.
+SSIM_CONFIRM_CHECKS = int(os.getenv("SSIM_CONFIRM_CHECKS", "3"))
+SSIM_CONFIRM_SECONDS = float(os.getenv("SSIM_CONFIRM_SECONDS", "60"))
+# Comparações "normais" usadas na linha de base
+SSIM_BASELINE_WINDOW = 10
+
 # Notificação na tela: o mesmo tipo de alerta (câmera + origem + nível)
 # não notifica de novo antes deste intervalo. Nível maior notifica na hora.
 NOTIFY_COOLDOWN_SECONDS = int(os.getenv("NOTIFY_COOLDOWN_SECONDS", "300"))
+# O cooldown vale por PATRIMÔNIO (todas as câmeras dele e todos os tipos de
+# alerta): um mesmo episódio no Drummond (câmeras 000056 e 001195) virava
+# 3-4 notificações. Só nível mais alto que o já notificado fura o cooldown.
 
 # Tempo (segundos) que um objeto de risco precisa permanecer dentro da
 # zona do monumento para o alerta escalar para CRÍTICO, independente do

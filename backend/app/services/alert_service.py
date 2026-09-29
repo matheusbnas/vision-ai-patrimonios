@@ -10,7 +10,7 @@ import threading
 import time
 from typing import Optional
 
-from app.config import NOTIFY_COOLDOWN_SECONDS
+from app.config import NOTIFY_COOLDOWN_SECONDS, PATRIMONIOS
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ MAX_ALERTS = 500
 # O mesmo alerta (câmera + origem + nível) não entra de novo no histórico
 # antes disto — a análise contínua avalia 2x/s e registraria o mesmo
 # "pessoa em cima da estátua" dezenas de vezes seguidas.
-DEDUP_SECONDS = 60
+DEDUP_SECONDS = 120
 
 # (camera, source, level) → último alerta registrado
 _last_stored: dict[tuple[str, str, str], dict] = {}
@@ -27,26 +27,36 @@ _LEVEL_RANK = {"MODERADO": 1, "ALTO": 2, "CRÍTICO": 3}
 
 # Quais alertas viram notificação na tela (som + mensagem). O resto fica
 # só no histórico/painel — senão o operador se acostuma a ignorar o som.
-#   interaction: qualquer nível (mão na área sensível, pessoa em cima)
+#   interaction: ALTO+ (pessoa em cima confirmada, mão na área sensível por muito tempo)
 #   risk:        objeto de risco encostado na estátua, ALTO+ (faca/tesoura, ou permanência)
-#   ssim:        mudança física na estátua, ALTO+
+#   ssim:        mudança física na estátua confirmada, ALTO+
 #   surface:     superfície protegida alterada com pessoa suspeita junto, ALTO+
 #   loitering:   nunca (informativo)
-_NOTIFY_MIN_LEVEL = {"interaction": 1, "risk": 2, "ssim": 2, "surface": 2}
+_NOTIFY_MIN_LEVEL = {"interaction": 2, "risk": 2, "ssim": 2, "surface": 2}
 
-# (camera, source) → (timestamp, nível) da última notificação
-_last_notified: dict[tuple[str, str], tuple[float, int]] = {}
+# câmera → patrimônio: câmeras do mesmo monumento compartilham o cooldown
+_CAMERA_PATRIMONIO = {code: str(p["id"]) for p in PATRIMONIOS for code in p.get("camera_codes", [])}
+
+# patrimônio (ou câmera avulsa) → (timestamp, nível) da última notificação
+_last_notified: dict[str, tuple[float, int]] = {}
+
+
+def incident_key(camera_code: str) -> str:
+    """Chave do episódio: o patrimônio da câmera, ou a própria câmera se avulsa."""
+    pid = _CAMERA_PATRIMONIO.get(camera_code)
+    return f"patrimonio:{pid}" if pid else f"camera:{camera_code}"
 
 
 def _should_notify(camera_code: str, source: str, level: str) -> bool:
     rank = _LEVEL_RANK.get(level, 0)
     if rank < _NOTIFY_MIN_LEVEL.get(source, 99):
         return False
-    key = (camera_code, source)
+    key = incident_key(camera_code)
     last = _last_notified.get(key)
     now = time.time()
-    # Mesmo tipo de alerta há pouco tempo: não repete — a não ser que o
-    # nível tenha subido (ex.: MODERADO → ALTO → CRÍTICO).
+    # Mesmo monumento notificado há pouco (qualquer câmera, qualquer tipo):
+    # o operador já está olhando — fica só no histórico. Nível mais alto
+    # que o já notificado (ALTO → CRÍTICO) notifica na hora.
     if last and now - last[0] < NOTIFY_COOLDOWN_SECONDS and rank <= last[1]:
         return False
     _last_notified[key] = (now, rank)

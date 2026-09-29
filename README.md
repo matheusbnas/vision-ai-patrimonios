@@ -87,7 +87,7 @@ O **sino de alertas** no header toca um som, mostra um contador e lista os alert
 2. **Vídeo contínuo** (câmeras em `LIVE_CAPTURE_CODES`):
    - Um Chrome headless mantém a página de vídeo aberta e lê frames a `LIVE_CAPTURE_FPS`.
    - A análise contínua (YOLO + ByteTrack a `LIVE_ANALYSIS_FPS`) acompanha cada pessoa por ID e marca "suspeito" quem fica junto à superfície da estátua.
-   - Uma mudança persistente na superfície atribuída a um suspeito gera alerta **CRÍTICO** com clipe de evidência (`EVIDENCE_PRE_SECONDS` / `EVIDENCE_POST_SECONDS`).
+   - Uma mudança persistente na superfície atribuída a um suspeito gera alerta **ALTO** ou **CRÍTICO** com clipe de evidência (`EVIDENCE_PRE_SECONDS` / `EVIDENCE_POST_SECONDS`).
 3. **Alertas** vêm de várias origens:
    - `risk`: objeto de risco;
    - `interaction`: pose;
@@ -95,7 +95,23 @@ O **sino de alertas** no header toca um som, mostra um contador e lista os alert
    - `surface`: pichação ou alteração na superfície;
    - `loitering`: permanência.
 
-   Níveis: MODERADO, ALTO e CRÍTICO. O mesmo tipo de alerta não notifica de novo antes de `NOTIFY_COOLDOWN_SECONDS`.
+   Níveis: MODERADO, ALTO e CRÍTICO. Os critérios estão abaixo.
+
+### 🚦 Critérios de alerta (revisados em setembro/2026)
+
+Os critérios foram endurecidos porque monumentos turísticos (ex.: Drummond, em Copacabana) geravam alertas repetidos com gente sentada ao lado da estátua para foto. A regra geral agora é **alertar só em aumento alto de alteração, que se mantém**.
+
+| Tipo | Antes | Agora |
+|---|---|---|
+| **Mudança física (SSIM, prints)** | > 3% alterado num único print já alertava | Nível pelo **aumento sobre o normal da câmera**, não pelo % bruto: +5 p.p. MODERADO, **+10 ALTO**, **+20 CRÍTICO**. O normal é a mediana das últimas comparações sem alteração, então sol e sombra mudando ao longo do dia não alertam. O salto precisa se repetir em **3 comparações seguidas em pelo menos 60 s**. Depois do alerta, o estado atual vira o novo normal e o mesmo dano não alerta de novo. |
+| **Mudança + interação** | Qualquer mudança > 3% até 10 min depois de qualquer toque na estátua virava **CRÍTICO** | Só escala para CRÍTICO com mudança **confirmada** e interação **confirmada** (pessoa em cima por 5 s, ou mão na área sensível por 30 s). |
+| **Superfície (vídeo contínuo)** | 1,5% alterado por 2 s com qualquer pessoa por perto → CRÍTICO | Só conta a alteração **longe de quem está na frente**: um halo em volta de cada pessoa descarta sombra, mochila e perna fora da caixa. Mínimo de **3%** por **4 s**; **ALTO** de 3% a 8%, **CRÍTICO** a partir de 8%. |
+| **Pessoa em cima da estátua** | Um tornozelo acima da base num frame → ALTO | **Os dois tornozelos** acima da base por **5 s** seguidos (tolera falhas de até 3 s na detecção). Antes disso é MODERADO, sem som. Um tornozelo só costuma ser perna cruzada de quem está sentado no banco. |
+| **Mão na área sensível** | MODERADO já tocava som | MODERADO fica só no histórico; notifica ao virar ALTO (30 s seguidos). |
+| **Notificação (som + mensagem)** | Cooldown por câmera e tipo: o mesmo episódio no Drummond virava 3 ou 4 notificações | Cooldown de `NOTIFY_COOLDOWN_SECONDS` **por patrimônio**, somando todas as câmeras e todos os tipos. Só um nível mais alto que o já notificado (ex.: ALTO → CRÍTICO) fura o cooldown. Tudo continua registrado no histórico (`GET /api/alerts`). |
+| **Referência do SSIM** | Se a captura falhava, usava uma imagem de demonstração como referência ou como frame atual, gerando "X% alterado" falso | Sem captura não compara nem troca a referência. A referência automática só é criada com o monumento livre de pessoas. |
+
+No card da câmera (Monitoramento), a comparação mostra o aumento sobre o normal e o progresso da confirmação (ex.: "+12.4 p.p. sobre o normal (3.1%) · confirmando 2/3").
 
 > Cada câmera em vídeo contínuo consome um Chrome (~200–400 MB de RAM). Adicione poucas por vez e acompanhe em `GET /api/monitor/live-capture/status`.
 
@@ -206,9 +222,13 @@ Para apontar para outro backend, defina `VITE_API_BASE` (ex.: `VITE_API_BASE=htt
 | `LIVE_CAPTURE_CODES` | `000056` | Câmeras com vídeo contínuo (separadas por vírgula) |
 | `LIVE_CAPTURE_FPS` / `LIVE_ANALYSIS_FPS` | `4` / `2` | Frames lidos / analisados por segundo |
 | `SURFACE_SUSPECT_SECONDS` | `4` | Tempo junto à superfície para virar "suspeito" |
-| `SURFACE_CHANGE_MIN_FRAC` | `0.015` | Fração da superfície alterada que conta como mudança |
+| `SURFACE_CHANGE_MIN_FRAC` / `SURFACE_CRITICAL_FRAC` | `0.03` / `0.08` | Alteração da superfície (longe das pessoas) para ALTO / CRÍTICO |
+| `SURFACE_CHANGE_CONFIRM_SECONDS` | `4` | Tempo que a alteração da superfície precisa se manter |
+| `SSIM_INCREASE_MODERADO` / `_ALTO` / `_CRITICO` | `5` / `10` / `20` | Aumento (p.p.) sobre o normal da câmera para cada nível |
+| `SSIM_CONFIRM_CHECKS` / `SSIM_CONFIRM_SECONDS` | `3` / `60` | Comparações seguidas e tempo mínimo para confirmar a mudança física |
+| `CLIMB_CONFIRM_SECONDS` | `5` | Tempo com os dois pés acima da base para "pessoa em cima" virar ALTO |
 | `EVIDENCE_PRE_SECONDS` / `EVIDENCE_POST_SECONDS` | `15` / `5` | Duração do clipe de evidência |
-| `NOTIFY_COOLDOWN_SECONDS` | `300` | Intervalo mínimo entre notificações iguais |
+| `NOTIFY_COOLDOWN_SECONDS` | `300` | Intervalo mínimo entre notificações do mesmo patrimônio |
 | `PERSON_LOITERING_ALERT_SECONDS` | `600` | Permanência que gera alerta preventivo |
 | `HF_TOKEN` | — | Token do Hugging Face (opcional) |
 | `OCTAVISION_WEBHOOK_TOKEN` | — | Token do webhook OctaVision |

@@ -18,11 +18,22 @@ import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 
-from app.config import INTERACTION_MEMORY_SECONDS, STATUE_OCCLUSION_SKIP
+from app.config import (
+    INTERACTION_MEMORY_SECONDS,
+    STATUE_OCCLUSION_SKIP,
+    SSIM_INCREASE_MODERADO,
+    SSIM_INCREASE_ALTO,
+    SSIM_INCREASE_CRITICO,
+    SSIM_CONFIRM_CHECKS,
+    SSIM_CONFIRM_SECONDS,
+    SSIM_BASELINE_WINDOW,
+)
 from app.models import interaction
 from app.services import zone_service
 
 logger = logging.getLogger(__name__)
+
+_LEVEL_RANK = {"NORMAL": 0, "MODERADO": 1, "ALTO": 2, "CRÍTICO": 3}
 
 
 def _zone_rect_px(frame: np.ndarray, camera_code: Optional[str] = None) -> tuple:
@@ -107,6 +118,10 @@ class ChangeDetector:
             "reference_time": time.time(),
             "last_check": time.time(),
             "last_hf": hf_result,
+            # % alterado das últimas comparações normais (linha de base)
+            "baseline": [],
+            # comparações seguidas com salto ALTO+: [(timestamp, nível)]
+            "streak": [],
         }
         logger.info(f"Referência definida para câmera {camera_code}")
         return {
@@ -258,39 +273,82 @@ class ChangeDetector:
                 "count": ignored_count,
             }
 
-        # ─── 2. Alerta baseado no SSIM ────────────────────────────
-        ssim_alert_level = self._ssim_alert_level(change_pct, len(changes))
+        # ─── 2. Nível pelo AUMENTO sobre a linha de base ──────────
+        # O % bruto sobe e desce com sol/sombra ao longo do dia; o que
+        # interessa é um salto em relação ao normal recente dessa câmera.
+        state = self.monitored[camera_code]
+        baseline_hist = state.setdefault("baseline", [])
+        streak = state.setdefault("streak", [])
+        baseline = float(np.median(baseline_hist)) if baseline_hist else 0.0
+        increase = max(change_pct - baseline, 0.0)
+        ssim_alert_level = self._ssim_alert_level(increase)
 
-        # ─── 3. HF Model no ROI (se disponível) ──────────────────
+        # ─── 3. Confirmação: o salto precisa se manter ─────────────
+        # Gente sentada ao lado, sombra de guarda-sol, reflexo: somem no
+        # print seguinte. Peça faltando ou tinta: continuam.
+        now = time.time()
+        if _LEVEL_RANK[ssim_alert_level] >= _LEVEL_RANK["ALTO"]:
+            streak.append((now, ssim_alert_level))
+        else:
+            streak.clear()
+            if ssim_alert_level == "NORMAL":
+                baseline_hist.append(change_pct)
+                del baseline_hist[:-SSIM_BASELINE_WINDOW]
+        confirmed = (len(streak) >= SSIM_CONFIRM_CHECKS
+                     and now - streak[0][0] >= SSIM_CONFIRM_SECONDS)
+        # Nível confirmado = o menor entre as comparações da sequência
+        confirmed_level = (min((lvl for _, lvl in streak[-SSIM_CONFIRM_CHECKS:]), key=_LEVEL_RANK.get)
+                           if confirmed else "NORMAL")
+        confirmation = {
+            "baseline_pct": round(baseline, 2),
+            "increase_pct": round(increase, 2),
+            "checks": len(streak),
+            "checks_needed": SSIM_CONFIRM_CHECKS,
+            "confirmed": confirmed,
+        }
+
+        # ─── 4. HF Model no ROI (só com mudança confirmada) ───────
         hf_result = None
         hf_alert = None
-        if det_service and det_service.hf_vandalism.model_loaded:
+        if confirmed and det_service and det_service.hf_vandalism.model_loaded:
             try:
                 hf_result = det_service.hf_vandalism.predict_image(current_roi)
                 hf_alert, _ = self._hf_alert(hf_result)
             except Exception as e:
                 logger.warning(f"Erro HF check: {e}")
 
-        # ─── 4. Alerta combinado ─────────────────────────────────
+        # ─── 5. Alerta combinado ─────────────────────────────────
         alert, final_level = self._combined_alert(
-            ssim_alert_level, change_pct, changes, hf_result, hf_alert
+            confirmed_level, change_pct, changes, hf_result, hf_alert
         )
+        if alert and alert.get("source") == "ssim":
+            alert["message"] = (
+                f"⚠️ {final_level}: Monumento alterado — {change_pct:.1f}% "
+                f"(+{increase:.1f} p.p. sobre o normal de {baseline:.1f}%), "
+                f"mantido em {len(streak)} comparações seguidas"
+            )
 
-        # ─── 5. Mudança logo depois de alguém mexer na estátua ────
+        # ─── 6. Mudança confirmada logo depois de alguém mexer ────
         # Os prints são espaçados — o gesto de arrancar uma peça pode cair
-        # entre dois deles. Mas se houve interação (mão na área sensível /
-        # pessoa em cima) há pouco e agora o contorno mudou, é o cenário de
-        # furto/dano: sobe pra CRÍTICO.
+        # entre dois deles. Se houve interação CONFIRMADA (pessoa em cima,
+        # mão na área sensível por muito tempo) há pouco e agora a mudança
+        # se manteve, é o cenário de furto/dano: sobe pra CRÍTICO.
         last = interaction.last_interaction(camera_code)
-        if alert and last and time.time() - last <= INTERACTION_MEMORY_SECONDS:
-            minutos = max(int((time.time() - last) // 60), 1)
+        if alert and last and now - last <= INTERACTION_MEMORY_SECONDS:
+            minutos = max(int((now - last) // 60), 1)
             final_level = "CRÍTICO"
             alert = {
                 "level": "CRÍTICO",
-                "message": (f"🚨 CRÍTICO: Estátua alterada ({change_pct:.1f}%) após interação "
-                            f"há ~{minutos} min — possível retirada de peça/dano"),
+                "message": (f"🚨 CRÍTICO: Estátua alterada ({change_pct:.1f}%, +{increase:.1f} p.p.) "
+                            f"após interação há ~{minutos} min — possível retirada de peça/dano"),
                 "source": "ssim+interacao",
             }
+
+        # Alerta emitido: o estado atual vira o novo normal — só alerta de
+        # novo se houver outro salto (não repete o mesmo dano a cada print)
+        if alert:
+            baseline_hist[:] = [change_pct]
+            streak.clear()
 
         # Atualiza estado
         self.monitored[camera_code]["last_check"] = time.time()
@@ -327,6 +385,7 @@ class ChangeDetector:
             "change_regions": len(changes),
             "significant_changes": changes[:10],
             "ssim_alert_level": ssim_alert_level,
+            "confirmation": confirmation,
             "hf_prediction": hf_result,
             "alert": alert,
             "alert_level": final_level,
@@ -340,18 +399,18 @@ class ChangeDetector:
         """Retorna histórico de verificações"""
         return self.change_history.get(camera_code, [])
 
-    def _ssim_alert_level(self, change_pct: float, num_regions: int) -> str:
-        """Nível de alerta baseado na mudança SSIM
-        
-        Thresholds mais conservadores para evitar falso-positivo:
-        - Pequenas variações de iluminação/pessoas passando são NORMAL
-        - Só alerta se houver mudança significativa e consistente no monumento
+    def _ssim_alert_level(self, increase_pct: float) -> str:
+        """Nível pelo aumento (pontos percentuais) sobre a linha de base.
+
+        Número de regiões saiu do critério: textura de pedra/areia e ruído
+        de compressão fragmentam o diff em muitas regiões pequenas sem que
+        nada tenha mudado no monumento.
         """
-        if change_pct > 20 or num_regions > 15:
+        if increase_pct >= SSIM_INCREASE_CRITICO:
             return "CRÍTICO"
-        if change_pct > 8 or num_regions > 8:
+        if increase_pct >= SSIM_INCREASE_ALTO:
             return "ALTO"
-        if change_pct > 3 or num_regions > 3:
+        if increase_pct >= SSIM_INCREASE_MODERADO:
             return "MODERADO"
         return "NORMAL"
 

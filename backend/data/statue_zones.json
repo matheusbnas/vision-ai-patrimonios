@@ -59,5 +59,14 @@
       "y_end": 0.31
     }
   },
-  "_coord_space": "video"
+  "_coord_space": "video",
+  "001195": {
+    "statue": {
+      "x_start": 0.1322,
+      "x_end": 0.4767,
+      "y_start": 0.1973,
+      "y_end": 1.0
+    },
+    "sensitive": null
+  }
 }

@@ -7,8 +7,10 @@ abraçar, segurar a mão do Drummond pra foto) do que é suspeito:
   - mão dentro da ÁREA SENSÍVEL (óculos/cabeça, violão...) — alvo típico
     de furto. Num print só é MODERADO (pode ser pose pra foto); se
     continuar nos prints seguidos por INTERACTION_ESCALATE_SECONDS, ALTO;
-  - pés acima da base, dentro do contorno — pessoa EM CIMA da estátua
-    ou do pedestal: ALTO.
+  - os DOIS pés acima da base, dentro do contorno — pessoa EM CIMA da
+    estátua ou do pedestal: ALTO depois de CLIMB_CONFIRM_SECONDS seguidos
+    (antes disso, MODERADO sem notificação). Um tornozelo só levantado é
+    perna cruzada de quem está sentado no banco do Drummond.
 
 Limitação: o monitoramento analisa prints a cada 10-60s, não vídeo. Um
 gesto rápido entre dois prints passa despercebido — por isso a
@@ -30,10 +32,11 @@ from app.config import (
     POSE_MODEL,
     POSE_KEYPOINT_CONF,
     CLIMB_FOOT_MIN_HEIGHT,
+    CLIMB_CONFIRM_SECONDS,
     INTERACTION_ESCALATE_SECONDS,
+    INTERACTION_GRACE_SECONDS,
     STATUE_SELF_IOU,
 )
-from app.services import risk_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +44,31 @@ logger = logging.getLogger(__name__)
 WRISTS = (9, 10)
 ANKLES = (15, 16)
 
-# Última interação por câmera (timestamp) — lida pela change_detector
+# Última interação CONFIRMADA por câmera (timestamp) — lida pela change_detector
 _last_interaction: dict[str, float] = {}
+# (câmera, evento) → (primeira vez visto, última vez visto)
+_event_seen: dict[tuple[str, str], tuple[float, float]] = {}
 _lock = threading.Lock()
 
 
 def last_interaction(camera_code: str) -> Optional[float]:
     with _lock:
         return _last_interaction.get(camera_code)
+
+
+def _event_dwell(camera_code: str, events: set[str], now: float) -> dict[str, float]:
+    """Há quanto tempo cada evento está acontecendo. Uma ausência curta
+    (pose que "pisca" entre frames) não zera a contagem."""
+    dwell = {}
+    with _lock:
+        for key in [k for k in _event_seen if k[0] == camera_code and k[1] not in events]:
+            if now - _event_seen[key][1] > INTERACTION_GRACE_SECONDS:
+                del _event_seen[key]
+        for ev in events:
+            first, _ = _event_seen.get((camera_code, ev), (now, now))
+            _event_seen[(camera_code, ev)] = (first, now)
+            dwell[ev] = now - first
+    return dwell
 
 
 def _inside(pt, box, margin: float = 0.0) -> bool:
@@ -126,7 +146,6 @@ class InteractionAnalyzer:
         quadro ganham resolução) e devolve o alerta de interação, se houver.
         Desenha no `annotated` (se dado) os pontos que dispararam a regra.
         """
-        tracker_key = f"{camera_code}::interacao"
         if not self.load_model():
             return None
 
@@ -172,28 +191,41 @@ class InteractionAnalyzer:
                             events.add("mao_area_sensivel")
                             hits.append((x, y, (255, 0, 255)))
 
-                for k in ANKLES:
-                    x, y, c = pts[k]
-                    if c >= POSE_KEYPOINT_CONF and sx1 <= x <= sx2 and sy1 <= y < climb_floor:
-                        events.add("em_cima_da_estatua")
-                        hits.append((x, y, (255, 0, 0)))
+                # Em cima = os dois tornozelos visíveis, dentro do contorno e
+                # acima da base. Um só levantado é perna cruzada/pé no banco.
+                raised = [pts[k] for k in ANKLES
+                          if pts[k][2] >= POSE_KEYPOINT_CONF and sx1 <= pts[k][0] <= sx2
+                          and sy1 <= pts[k][1] < climb_floor]
+                if len(raised) == len(ANKLES):
+                    events.add("em_cima_da_estatua")
+                    hits.extend((x, y, (255, 0, 0)) for x, y, _ in raised)
 
-        dwell = risk_tracker.update(tracker_key, events)
+        now = time.time()
+        dwell = _event_dwell(camera_code, events, now)
         if not events:
             return None
-
-        with _lock:
-            _last_interaction[camera_code] = time.time()
 
         if annotated is not None:
             for x, y, color in hits:
                 cv2.circle(annotated, (int(x), int(y)), 9, color, 3)
 
-        if "em_cima_da_estatua" in events:
+        climb_secs = dwell.get("em_cima_da_estatua", 0.0)
+        hand_secs = dwell.get("mao_area_sensivel", 0.0)
+        confirmed = climb_secs >= CLIMB_CONFIRM_SECONDS or hand_secs >= INTERACTION_ESCALATE_SECONDS
+        # Só interação confirmada "arma" a escalada da mudança física para
+        # CRÍTICO — turista encostando pra foto não pode armar
+        if confirmed:
+            with _lock:
+                _last_interaction[camera_code] = now
+
+        if climb_secs >= CLIMB_CONFIRM_SECONDS:
             level = "ALTO"
-            msg = "🚨 ALTO: Pessoa em cima da estátua/pedestal"
+            msg = f"🚨 ALTO: Pessoa em cima da estátua/pedestal há {int(climb_secs)}s"
+        elif "em_cima_da_estatua" in events and hand_secs < INTERACTION_ESCALATE_SECONDS:
+            level = "MODERADO"
+            msg = "⚠️ MODERADO: Possível pessoa em cima da estátua/pedestal (confirmando)"
         else:
-            secs = dwell.get("mao_area_sensivel", 0.0)
+            secs = hand_secs
             if secs >= INTERACTION_ESCALATE_SECONDS:
                 level = "ALTO"
                 msg = (f"🚨 ALTO: Mão na área sensível da estátua há {int(secs)}s "
