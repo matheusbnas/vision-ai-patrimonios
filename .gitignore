@@ -50,3 +50,6 @@ Thumbs.db
 
 # ─── Outros ─────────────────────────────────────────────────────
 package-lock.json
+
+# Evidências dos eventos de superfície (imagens + clipes gerados em runtime)
+backend/assets/evidence/

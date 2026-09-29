@@ -30,8 +30,9 @@ _LEVEL_RANK = {"MODERADO": 1, "ALTO": 2, "CRÍTICO": 3}
 #   interaction: qualquer nível (mão na área sensível, pessoa em cima)
 #   risk:        objeto de risco encostado na estátua, ALTO+ (faca/tesoura, ou permanência)
 #   ssim:        mudança física na estátua, ALTO+
+#   surface:     superfície protegida alterada com pessoa suspeita junto, ALTO+
 #   loitering:   nunca (informativo)
-_NOTIFY_MIN_LEVEL = {"interaction": 1, "risk": 2, "ssim": 2}
+_NOTIFY_MIN_LEVEL = {"interaction": 1, "risk": 2, "ssim": 2, "surface": 2}
 
 # (camera, source) → (timestamp, nível) da última notificação
 _last_notified: dict[tuple[str, str], tuple[float, int]] = {}
@@ -57,7 +58,8 @@ _id_counter = itertools.count(1)
 
 
 def add_alert(camera_code: str, camera_name: str, level: str, message: str,
-              source: str, objects: Optional[list[str]] = None) -> dict:
+              source: str, objects: Optional[list[str]] = None,
+              evidence: Optional[dict] = None) -> dict:
     """Registra um novo alerta e retorna o registro criado."""
     key = (camera_code, source, level)
     with _lock:
@@ -73,9 +75,12 @@ def add_alert(camera_code: str, camera_name: str, level: str, message: str,
         "level": level,
         "message": message,
         # "risk" (objeto de risco), "interaction" (pose), "loitering"
-        # (presença contínua) ou "ssim" (mudança física)
+        # (presença contínua), "ssim" (mudança física no print) ou
+        # "surface" (superfície alterada no vídeo, com pessoa suspeita)
         "source": source,
         "objects": objects or [],
+        # Eventos de superfície: imagens antes/durante/depois + clipe
+        "evidence": evidence,
         "notify": notify,  # true = frontend toca som + mostra mensagem
     }
     with _lock:
@@ -85,6 +90,15 @@ def add_alert(camera_code: str, camera_name: str, level: str, message: str,
             del _alerts[: len(_alerts) - MAX_ALERTS]
     logger.info(f"🚨 Alerta registrado: {camera_code} [{level}] {message}")
     return entry
+
+
+def update_evidence(alert_id: int, evidence: dict) -> None:
+    """Completa as evidências de um alerta já registrado (depois.jpg + clipe)."""
+    with _lock:
+        for a in reversed(_alerts):
+            if a["id"] == alert_id:
+                a["evidence"] = evidence
+                return
 
 
 def get_alerts(since: Optional[float] = None, camera_code: Optional[str] = None,

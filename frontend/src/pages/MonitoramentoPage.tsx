@@ -15,6 +15,69 @@ import type { Patrimonio } from '../types'
 import ZoneCalibrator from '../components/ZoneCalibrator'
 import CameraStreamView from '../components/CameraStreamView'
 
+// Evento de superfície (análise contínua): imagens antes/durante/depois +
+// trecho do vídeo. `complete` = depois.jpg e clipe já gravados.
+interface SurfaceEvent {
+  event_id: string
+  timestamp: number
+  message: string
+  change_percent: number
+  suspect_track_ids: number[]
+  images: { antes?: string; durante?: string; depois?: string }
+  clip: string | null
+  complete: boolean
+}
+
+// Evento de superfície fica em destaque no card por este tempo
+const SURFACE_EVENT_VISIBLE_MS = 30 * 60 * 1000
+// Acima disto, câmeras ao vivo voltam a atualizar por polling em vez de
+// MJPEG — cada MJPEG prende uma das ~6 conexões HTTP/1.1 do navegador
+// com o backend, e o resto da página (polling, alertas) ficaria na fila.
+const MAX_MJPEG_STREAMS = 4
+
+function SurfaceEventCard({ event }: { event: SurfaceEvent }) {
+  const shots: [string, string | undefined][] = [
+    ['Antes', event.images.antes],
+    ['Durante', event.images.durante],
+    ['Depois', event.images.depois],
+  ]
+  return (
+    <div className="rounded-lg border border-red-200 bg-red-50 p-2 space-y-2">
+      <div className="flex items-start gap-2 text-red-800">
+        <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+        <div>
+          <p className="font-bold text-[10px]">{event.message}</p>
+          <p className="text-[10px] opacity-70">
+            {new Date(event.timestamp * 1000).toLocaleTimeString('pt-BR')} · possível evento para
+            validação humana (sem reconhecimento facial)
+          </p>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-1">
+        {shots.map(([label, src]) => (
+          <figure key={label} className="text-center">
+            {src ? (
+              <a href={api.assetUrl(src)} target="_blank" rel="noreferrer">
+                <img src={api.assetUrl(src)} alt={label} className="w-full rounded border border-red-200" />
+              </a>
+            ) : (
+              <div className="aspect-video rounded border border-dashed border-red-200 flex items-center justify-center text-[9px] text-red-400">
+                aguardando…
+              </div>
+            )}
+            <figcaption className="text-[9px] text-red-700 mt-0.5">{label}</figcaption>
+          </figure>
+        ))}
+      </div>
+      {event.clip ? (
+        <video src={api.assetUrl(event.clip)} controls muted className="w-full rounded border border-red-200" />
+      ) : (
+        <p className="text-[10px] text-red-600">{event.complete ? 'Clipe indisponível' : '🎞️ Gravando trecho do vídeo…'}</p>
+      )}
+    </div>
+  )
+}
+
 interface DetectionFrame {
   camera_code: string
   camera_name: string
@@ -64,6 +127,10 @@ interface DetectionFrame {
     message: string
     dwell_seconds?: number
   }
+  // Análise contínua: superfície protegida alterada com pessoa suspeita junto
+  surface_alert?: { level: string; message: string } | null
+  surface_event?: SurfaceEvent | null
+  suspects?: number[]
   // Pessoas/veículos detectados (YOLO) dentro da zona — não contam como alteração do monumento
   ignored_objects_count?: number
   ignored_objects_alert?: {
@@ -196,8 +263,10 @@ export default function MonitoramentoPage() {
   }, [viewMode])
 
   // Câmeras com vídeo + análise contínua no backend (LIVE_CAPTURE_CODES):
-  // no modo Prints, mostram o último frame ANALISADO (~2/s) em vez do
-  // print do ciclo de 10s. code → FPS da análise (só as que estão ao vivo)
+  // nos dois modos mostram o frame ANALISADO (MJPEG, caixas e imagem do
+  // mesmo instante) em vez do print do ciclo de 10s — sobrepor detecção
+  // velha no player ao vivo deixava "fantasmas" de quem já tinha passado.
+  // code → FPS da análise (só as que estão ao vivo)
   const [liveCams, setLiveCams] = useState<Record<string, number>>({})
   const [liveTick, setLiveTick] = useState(0)
   useEffect(() => {
@@ -219,12 +288,20 @@ export default function MonitoramentoPage() {
     const id = setInterval(load, 10000)
     return () => clearInterval(id)
   }, [])
-  const hasVisibleLive = viewMode === 'snapshot' && selectedCodes.some((c) => c in liveCams)
+  const visibleLiveCount = selectedCodes.filter((c) => c in liveCams).length
+  const useMjpeg = visibleLiveCount <= MAX_MJPEG_STREAMS
+  // MJPEG caiu (backend reiniciou, câmera sem análise): reconecta em 3s
+  const [mjpegRetry, setMjpegRetry] = useState<Record<string, number>>({})
+  const retryMjpeg = useCallback((code: string) => {
+    setTimeout(() => setMjpegRetry((r) => ({ ...r, [code]: (r[code] || 0) + 1 })), 3000)
+  }, [])
+  // Fallback por polling (muitas câmeras ao vivo na tela)
+  const pollLive = !useMjpeg && visibleLiveCount > 0
   useEffect(() => {
-    if (!hasVisibleLive) return
-    const id = setInterval(() => setLiveTick((t) => t + 1), 1000)
+    if (!pollLive) return
+    const id = setInterval(() => setLiveTick((t) => t + 1), 500)
     return () => clearInterval(id)
-  }, [hasVisibleLive])
+  }, [pollLive])
   // Resultado do "print" puro por câmera (sem YOLO/HF) — só pra checar
   // rapidamente se a câmera está entregando vídeo, isolado da IA.
   const [snapshots, setSnapshots] = useState<Record<string, {
@@ -682,7 +759,11 @@ export default function MonitoramentoPage() {
               {selectedCodes.map((code) => {
                 const frame = frames[code]
                 // Presença contínua (loitering) é só informativa — não pinta o cabeçalho
-                const hasAlert = frame?.alert != null || frame?.risk_alert != null || frame?.interaction_alert != null
+                const hasAlert = frame?.alert != null || frame?.risk_alert != null
+                  || frame?.interaction_alert != null || frame?.surface_alert != null
+                const surfaceEvent = frame?.surface_event
+                  && Date.now() - frame.surface_event.timestamp * 1000 < SURFACE_EVENT_VISIBLE_MS
+                  ? frame.surface_event : null
 
                 return (
                   <div key={code} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden flex flex-col">
@@ -741,14 +822,17 @@ export default function MonitoramentoPage() {
 
                     {/* Stream ao vivo + overlay — ocupa a maior parte da tela */}
                     <div className="relative bg-black flex-1" style={{ minHeight: selectedCodes.length > 4 ? '240px' : '420px' }}>
-                      {viewMode === 'snapshot' ? (
-                        code in liveCams ? (
-                          <img
-                            src={api.liveAnalysisFrameUrl(code, liveTick)}
-                            alt={`Análise ao vivo ${code}`}
-                            className="absolute inset-0 w-full h-full object-contain"
-                          />
-                        ) : frame?.image_base64 ? (
+                      {code in liveCams ? (
+                        <img
+                          src={useMjpeg
+                            ? api.liveAnalysisStreamUrl(code, mjpegRetry[code] || 0)
+                            : api.liveAnalysisFrameUrl(code, liveTick)}
+                          onError={() => useMjpeg && retryMjpeg(code)}
+                          alt={`Análise ao vivo ${code}`}
+                          className="absolute inset-0 w-full h-full object-contain"
+                        />
+                      ) : viewMode === 'snapshot' ? (
+                        frame?.image_base64 ? (
                           <img
                             src={`data:image/jpeg;base64,${frame.image_base64}`}
                             alt={`Print analisado ${code}`}
@@ -777,29 +861,21 @@ export default function MonitoramentoPage() {
                           </div>
                         )
                       ) : (
-                        <>
-                          <CameraStreamView
-                            code={code}
-                            streamUrl={streamUrls[code]}
-                            hlsUrl={hlsUrls[code]}
-                            streamType={streamTypes[code]}
-                            reloadToken={manualReload[code] || 0}
-                            className="absolute inset-0 w-full h-full object-contain border-none"
-                            onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
-                            onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
-                          />
-                          {/* Overlay com imagem anotada do YOLO (quando disponível) */}
-                          {frame?.image_base64 && (
-                            <img
-                              src={`data:image/jpeg;base64,${frame.image_base64}`}
-                              alt={`Detecção ${code}`}
-                              className="absolute inset-0 w-full h-full object-cover opacity-60 pointer-events-none"
-                            />
-                          )}
-                        </>
+                        // Player puro, sem sobrepor o print anotado: ele é do
+                        // ciclo de 10s e aparecia como "fantasma" sobre o vídeo
+                        <CameraStreamView
+                          code={code}
+                          streamUrl={streamUrls[code]}
+                          hlsUrl={hlsUrls[code]}
+                          streamType={streamTypes[code]}
+                          reloadToken={manualReload[code] || 0}
+                          className="absolute inset-0 w-full h-full object-contain border-none"
+                          onLoad={() => setStreamErrors((s) => ({ ...s, [code]: false }))}
+                          onError={() => setStreamErrors((s) => ({ ...s, [code]: true }))}
+                        />
                       )}
                       {/* Fallback se iframe falhar */}
-                      {viewMode === 'live' && streamErrors[code] && (
+                      {viewMode === 'live' && !(code in liveCams) && streamErrors[code] && (
                         <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm bg-gray-900/90">
                           <div className="text-center">
                             <WifiOff size={28} className="mx-auto mb-2" />
@@ -808,8 +884,14 @@ export default function MonitoramentoPage() {
                         </div>
                       )}
 
-                      {/* Badge: interação com a estátua > objeto de risco > mudança física */}
-                      {frame?.interaction_alert ? (
+                      {/* Badge: pichação > interação com a estátua > objeto de risco > mudança física */}
+                      {frame?.surface_alert ? (
+                        <div className="absolute top-2 left-2 z-10">
+                          <span className="text-[10px] px-2 py-0.5 rounded font-bold shadow-lg bg-red-600 text-white animate-pulse">
+                            🎨 POSSÍVEL PICHAÇÃO
+                          </span>
+                        </div>
+                      ) : frame?.interaction_alert ? (
                         <div className="absolute top-2 left-2 z-10">
                           <span className="text-[10px] px-2 py-0.5 rounded font-bold shadow-lg bg-red-600 text-white animate-pulse">
                             ✋ INTERAÇÃO COM A ESTÁTUA
@@ -835,16 +917,16 @@ export default function MonitoramentoPage() {
 
                       {/* Badge AO VIVO / horário do print */}
                       <div className="absolute top-2 right-2 z-10">
-                        {viewMode === 'live' ? (
-                          <span className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold animate-pulse shadow-lg">
-                            🔴 AO VIVO
-                          </span>
-                        ) : code in liveCams ? (
+                        {code in liveCams ? (
                           <span
                             className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold shadow-lg"
                             title="Vídeo contínuo com YOLO + rastreamento rodando no servidor"
                           >
                             🔴 AO VIVO · IA {liveCams[code].toFixed(1)}/s
+                          </span>
+                        ) : viewMode === 'live' ? (
+                          <span className="bg-red-600 text-white text-[10px] px-2 py-0.5 rounded font-bold animate-pulse shadow-lg">
+                            🔴 AO VIVO
                           </span>
                         ) : frame?.image_base64 && (
                           <span className={`text-white text-[10px] px-2 py-0.5 rounded font-bold shadow-lg ${
@@ -876,6 +958,9 @@ export default function MonitoramentoPage() {
                           )}
                         </div>
                       )}
+                      {/* Superfície protegida alterada com pessoa suspeita (evidências) */}
+                      {surfaceEvent && <SurfaceEventCard event={surfaceEvent} />}
+
                       {/* Alerta preditivo (YOLO — objeto de risco no quadrante) */}
                       {frame?.risk_alert && (
                         <div className="rounded-lg p-2 flex items-center gap-2 bg-red-100 text-red-800 animate-pulse">

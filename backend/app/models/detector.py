@@ -98,7 +98,7 @@ class PatrimonyDetector:
 
     def detect(self, image: np.ndarray, confidence: Optional[float] = None,
                camera_code: Optional[str] = None, track: bool = False,
-               statue_track_ids: Optional[set] = None) -> dict:
+               statue_track_ids: Optional[set] = None, draw: bool = True) -> dict:
         """
         Executa detecção em uma imagem, filtrando objetos de risco
         pelo quadrante (zona) do monumento.
@@ -107,6 +107,8 @@ class PatrimonyDetector:
             image: Imagem em array numpy (RGB)
             confidence: Threshold de confiança (opcional)
             camera_code: Código da câmera, para usar a zona calibrada (opcional)
+            draw: False = annotated_image é o frame limpo (só a pose, se
+                rodar) — a análise contínua desenha a própria sobreposição
 
         Returns:
             dict: Resultados da detecção, incluindo risk_objects/risk_alert
@@ -183,8 +185,10 @@ class PatrimonyDetector:
                     class_counts[class_name] += 1
 
             # Gerar imagem anotada
-            annotated_image = result.plot()
-            annotated_image = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
+            if draw:
+                annotated_image = cv2.cvtColor(result.plot(), cv2.COLOR_BGR2RGB)
+            else:
+                annotated_image = image.copy()
         else:
             annotated_image = image.copy()
 
@@ -284,12 +288,13 @@ class PatrimonyDetector:
 
         # ─── Desenha zona, contorno da estátua e objetos de risco ────────
         zx1, zy1, zx2, zy2 = zone
-        cv2.rectangle(annotated_image, (zx1, zy1), (zx2, zy2), (0, 255, 255), 1)
-        if statue_px:
-            cv2.rectangle(annotated_image, statue_px[:2], statue_px[2:], (0, 200, 255), 2)
-        if sensitive_px:
-            cv2.rectangle(annotated_image, sensitive_px[:2], sensitive_px[2:], (255, 0, 255), 2)
-        for d in risk_objects:
+        if draw:
+            cv2.rectangle(annotated_image, (zx1, zy1), (zx2, zy2), (0, 255, 255), 1)
+            if statue_px:
+                cv2.rectangle(annotated_image, statue_px[:2], statue_px[2:], (0, 200, 255), 2)
+            if sensitive_px:
+                cv2.rectangle(annotated_image, sensitive_px[:2], sensitive_px[2:], (255, 0, 255), 2)
+        for d in risk_objects if draw else []:
             rx1, ry1, rx2, ry2 = d["bbox"]
             cv2.rectangle(annotated_image, (rx1, ry1), (rx2, ry2), (255, 0, 0), 3)
             cv2.putText(annotated_image, d["class_name"], (rx1, max(ry1 - 8, 0)),

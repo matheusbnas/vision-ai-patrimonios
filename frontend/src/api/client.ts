@@ -200,6 +200,17 @@ class ApiClient {
     return `${API_BASE}/api/monitor/live-analysis/${code}/frame.jpg?t=${t}`
   }
 
+  // MJPEG dos frames analisados: o servidor empurra cada análise nova assim
+  // que fica pronta (caixas e imagem do mesmo instante). `t` força reconexão.
+  liveAnalysisStreamUrl(code: string, t = 0) {
+    return `${API_BASE}/api/monitor/live-analysis/${code}/stream.mjpg?t=${t}`
+  }
+
+  // Arquivos servidos pelo mount /assets (evidências dos eventos)
+  assetUrl(path: string) {
+    return `${API_BASE}${path}`
+  }
+
   // ─── Alertas (polling incremental por id) ─────────────────────
 
   async getAlerts(params: { afterId?: number; notify?: boolean; limit?: number } = {}) {

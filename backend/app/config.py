@@ -79,6 +79,25 @@ LIVE_CAPTURE_BUFFER_SECONDS = float(os.getenv("LIVE_CAPTURE_BUFFER_SECONDS", "4"
 # por câmera — ver services/live_analysis.py
 LIVE_ANALYSIS_FPS = float(os.getenv("LIVE_ANALYSIS_FPS", "2"))
 
+# ─── Superfície protegida + pessoa suspeita (análise contínua) ───
+# Superfície = contorno calibrado da estátua; zona monitorada = quadrante.
+# Pessoa junto à superfície por este tempo seguido → "suspeito".
+SURFACE_SUSPECT_SECONDS = float(os.getenv("SURFACE_SUSPECT_SECONDS", "4"))
+# Uma mudança na superfície é associada a um suspeito visto até este tempo antes
+SURFACE_SUSPECT_MEMORY_SECONDS = float(os.getenv("SURFACE_SUSPECT_MEMORY_SECONDS", "60"))
+# Fração da superfície visível alterada de forma persistente pra contar como mudança
+SURFACE_CHANGE_MIN_FRAC = float(os.getenv("SURFACE_CHANGE_MIN_FRAC", "0.015"))
+# Mudança sustentada por este tempo (com suspeito) → alerta
+SURFACE_CHANGE_CONFIRM_SECONDS = float(os.getenv("SURFACE_CHANGE_CONFIRM_SECONDS", "2"))
+# Mudança sem nenhum suspeito por este tempo é absorvida (mudança de cena,
+# objeto deixado) — não dispara depois quando alguém se aproximar
+SURFACE_UNATTRIBUTED_ABSORB_SECONDS = 60
+# Após um evento, a mesma câmera não gera outro antes disto
+SURFACE_EVENT_COOLDOWN_SECONDS = int(os.getenv("SURFACE_EVENT_COOLDOWN_SECONDS", "120"))
+# Clipe de evidência: segundos antes do início da mudança e após a confirmação
+EVIDENCE_PRE_SECONDS = float(os.getenv("EVIDENCE_PRE_SECONDS", "15"))
+EVIDENCE_POST_SECONDS = float(os.getenv("EVIDENCE_POST_SECONDS", "5"))
+
 # ─── Monitoramento contínuo em background ────────────────────────
 # Varre todas as câmeras dos patrimônios sequencialmente (uma por vez,
 # não em paralelo — evita sobrecarregar a máquina que roda o YOLO/HF).

@@ -14,7 +14,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
@@ -1071,6 +1071,12 @@ def _live_to_response(live: dict, code: str, include_image: bool) -> dict:
         "risk_alert": live["risk_alert"],
         "interaction_alert": live["interaction_alert"],
         "loitering_alert": live["loitering_alert"],
+        # Superfície protegida: alerta do instante, último evento (com
+        # evidências), estado da comparação e IDs suspeitos recentes
+        "surface_alert": live["surface_alert"],
+        "surface_event": live["surface_event"],
+        "surface": live["surface"],
+        "suspects": live["suspects"],
         "people_near_statue": live["people_near_statue"],
         "hf_prediction": None,
         "processing_time_ms": live["processing_time_ms"],
@@ -1098,6 +1104,44 @@ async def live_analysis_frame(camera_code: str):
     if jpg is None:
         raise HTTPException(status_code=404, detail="Sem análise recente para esta câmera")
     return Response(content=jpg, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/live-analysis/{camera_code}/stream.mjpg")
+async def live_analysis_stream(camera_code: str, request: Request):
+    """
+    Frames ANALISADOS em MJPEG (multipart/x-mixed-replace): cada análise nova
+    é empurrada assim que fica pronta. Caixas e vídeo são o MESMO frame —
+    nada de sobrepor detecção velha no vídeo ao vivo (o "fantasma").
+    """
+    import asyncio
+    from fastapi.responses import StreamingResponse
+    from app.services import live_analysis
+
+    if live_analysis.latest_jpeg_seq(camera_code) is None:
+        raise HTTPException(status_code=404, detail="Sem análise recente para esta câmera")
+
+    async def frames():
+        last_seq, idle_since = -1, time.time()
+        while not await request.is_disconnected():
+            item = live_analysis.latest_jpeg_seq(camera_code)
+            if item and item[0] != last_seq:
+                last_seq, idle_since = item[0], time.time()
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                       + str(len(item[1])).encode() + b"\r\n\r\n" + item[1] + b"\r\n")
+            elif time.time() - idle_since > 30:
+                return  # análise parou (câmera caiu): encerra; o <img> dispara onError
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(frames(), media_type="multipart/x-mixed-replace; boundary=frame",
+                             headers={"Cache-Control": "no-store"})
+
+
+@router.get("/surface-events")
+async def surface_events(camera_code: Optional[str] = Query(None), limit: int = Query(20, ge=1, le=200)):
+    """Eventos de superfície (pessoa suspeita + mudança) com URLs das evidências."""
+    from app.services import evidence_service
+    events = await run_in_threadpool(evidence_service.list_events, camera_code, limit)
+    return {"success": True, "total": len(events), "events": events}
 
 
 @router.get("/live-capture/{camera_code}/frame.jpg")
