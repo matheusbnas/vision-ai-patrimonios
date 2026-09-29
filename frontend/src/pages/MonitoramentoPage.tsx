@@ -262,6 +262,10 @@ interface SimResult {
   level: string
   would_alert: boolean
   still_learning?: boolean
+  source?: 'atual' | 'referencia'
+  source_reason?: string | null
+  before_base64?: string
+  after_base64?: string
   verdict: string
   reference_roi_base64?: string
   current_roi_base64?: string
@@ -1387,44 +1391,80 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
       {/* Resultado do teste de dano simulado */}
       {simResult && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setSimResult(null)}>
-          <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full p-4 space-y-3" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-xl shadow-xl max-w-4xl w-full max-h-[92vh] overflow-y-auto p-4 space-y-4" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
                 <FlaskConical size={16} className="text-purple-600" />
-                Teste: {simResult.cenario_label} · câmera {simResult.camera_code}
+                Teste de detecção: {simResult.cenario_label} · câmera {simResult.camera_code}
               </h3>
               <button onClick={() => setSimResult(null)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
             </div>
+
+            {simResult.source === 'referencia' && (
+              <div className="rounded-lg bg-sky-50 text-sky-800 text-xs p-2.5">
+                ℹ️ Agora não dá pra testar na imagem ao vivo ({simResult.source_reason}). O teste foi feito na
+                <strong> imagem de referência</strong>, com a estátua livre. Em operação é o mesmo: com gente na frente, o
+                sistema pula a comparação e confere de novo quando a estátua fica livre.
+              </div>
+            )}
+
+            {/* 1. O que foi simulado */}
+            <section>
+              <p className="text-xs font-semibold text-gray-700 mb-1.5">
+                1. O dano simulado — {simResult.source === 'referencia' ? 'imagem de referência' : 'imagem atual da câmera'}
+                <span className="font-normal text-gray-400"> (contorno amarelo = área da estátua que o sistema compara)</span>
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { src: simResult.before_base64, label: 'ANTES — como a câmera vê' },
+                  { src: simResult.after_base64, label: `DEPOIS — com "${simResult.cenario_label}"` },
+                ].map((im) => im.src && (
+                  <figure key={im.label} className="rounded-lg ring-1 ring-gray-200 overflow-hidden cursor-zoom-in"
+                    onClick={() => setZoomImage({ src: `data:image/jpeg;base64,${im.src}`, label: im.label })}>
+                    <img src={`data:image/jpeg;base64,${im.src}`} alt={im.label} className="w-full h-72 object-contain bg-black" />
+                    <figcaption className="text-[11px] font-medium text-gray-600 text-center py-1">{im.label}</figcaption>
+                  </figure>
+                ))}
+              </div>
+            </section>
+
+            {/* 2. O que o sistema viu */}
+            <section>
+              <p className="text-xs font-semibold text-gray-700 mb-1.5">2. O que o sistema detectou na estátua</p>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { src: simResult.reference_roi_base64, label: 'Referência (estátua normal)' },
+                  { src: simResult.current_roi_base64, label: 'Imagem analisada (com o dano)' },
+                  { src: simResult.highlight_image_base64, label: 'Alterado em vermelho · encoberto em azul' },
+                ].map((im) => im.src && (
+                  <figure key={im.label} className="rounded ring-1 ring-gray-200 overflow-hidden cursor-zoom-in"
+                    onClick={() => setZoomImage({ src: `data:image/jpeg;base64,${im.src}`, label: im.label })}>
+                    <img src={`data:image/jpeg;base64,${im.src}`} alt={im.label} className="w-full h-48 object-contain bg-black" />
+                    <figcaption className="text-[10px] text-gray-500 text-center py-1">{im.label}</figcaption>
+                  </figure>
+                ))}
+              </div>
+              <div className="mt-2 grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="bg-gray-50 rounded-lg p-2">
+                  <p className="text-lg font-bold text-gray-700">{simResult.sem_dano_pct != null ? `${simResult.sem_dano_pct.toFixed(1)}%` : '—'}</p>
+                  <p className="text-[10px] text-gray-500">Estátua alterada ANTES</p>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-2">
+                  <p className="text-lg font-bold text-red-600">{simResult.com_dano_pct.toFixed(1)}%</p>
+                  <p className="text-[10px] text-gray-500">Estátua alterada DEPOIS</p>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-2">
+                  <p className="text-lg font-bold text-gray-700">{simResult.level}</p>
+                  <p className="text-[10px] text-gray-500">Nível do alerta</p>
+                </div>
+              </div>
+            </section>
+
+            {/* 3. Veredito */}
             <div className={`rounded-lg p-3 text-sm font-medium ${simResult.would_alert ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-800'}`}>
-              {simResult.would_alert ? '✅ ' : '⚠️ '}{simResult.verdict}
+              3. {simResult.would_alert ? '✅ ' : '⚠️ '}{simResult.verdict}
             </div>
-            <div className="grid grid-cols-3 gap-2 text-center text-xs">
-              <div className="bg-gray-50 rounded-lg p-2">
-                <p className="text-lg font-bold text-gray-700">{simResult.sem_dano_pct != null ? `${simResult.sem_dano_pct.toFixed(1)}%` : '—'}</p>
-                <p className="text-[10px] text-gray-500">Alterada SEM dano (agora)</p>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-2">
-                <p className="text-lg font-bold text-red-600">{simResult.com_dano_pct.toFixed(1)}%</p>
-                <p className="text-[10px] text-gray-500">Alterada COM o dano</p>
-              </div>
-              <div className="bg-gray-50 rounded-lg p-2">
-                <p className="text-lg font-bold text-gray-700">{simResult.level}</p>
-                <p className="text-[10px] text-gray-500">Nível (+{simResult.increase_pct.toFixed(1)} p.p.)</p>
-              </div>
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {[
-                { src: simResult.reference_roi_base64, label: 'Referência' },
-                { src: simResult.current_roi_base64, label: 'Agora + dano simulado' },
-                { src: simResult.highlight_image_base64, label: 'Alterado (vermelho) · encoberto (azul)' },
-              ].map((im) => im.src && (
-                <figure key={im.label} className="rounded ring-1 ring-gray-200 overflow-hidden cursor-zoom-in"
-                  onClick={() => setZoomImage({ src: `data:image/jpeg;base64,${im.src}`, label: im.label })}>
-                  <img src={`data:image/jpeg;base64,${im.src}`} alt={im.label} className="w-full h-64 object-contain bg-black" />
-                  <figcaption className="text-[10px] text-gray-500 text-center py-1">{im.label}</figcaption>
-                </figure>
-              ))}
-            </div>
+
             {simResult.still_learning && (
               <p className="text-[11px] text-amber-700">
                 A câmera ainda está na fase de aprendizado do fundo: o resultado pode incluir fundo (mar, areia) que depois sai da conta.

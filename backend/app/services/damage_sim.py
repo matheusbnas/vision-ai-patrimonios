@@ -83,7 +83,7 @@ def apply(img: np.ndarray, silhouette: np.ndarray, scenario: str,
         if sensitive_box:
             sx1, sy1, sx2, sy2 = sensitive_box
         else:  # sem área sensível calibrada: faixa dos olhos/óculos
-            sx1, sy1, sx2, sy2 = int(x1 + w * .3), int(y1 + h * .07), int(x1 + w * .8), int(y1 + h * .13)
+            sx1, sy1, sx2, sy2 = int(x1 + w * .3), int(y1 + h * .12), int(x1 + w * .68), int(y1 + h * .19)
         band[sy1:sy2, sx1:sx2] = True
         out = _remove(out, band & silhouette)
 

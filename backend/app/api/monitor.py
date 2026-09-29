@@ -1184,15 +1184,10 @@ async def simulate_damage(camera_code: str, cenario: str = Query(..., descriptio
         ref_gray = state["reference_gray"]
         h, w = ref_gray.shape[:2]
         cur = cv2.resize(frame, (w, h)) if frame.shape[:2] != (h, w) else frame
-        M, info = statue_compare.align(ref_gray, cv2.cvtColor(cur, cv2.COLOR_RGB2GRAY), state["area"])
-        if M is None:
-            return {"error": f"Não foi possível alinhar com a referência ({info.get('reason')})"}
-        aligned = cv2.warpAffine(cur, M, (w, h))
         cfg = zone_service.get_statue(camera_code)
         sens = cfg.get("sensitive")
         sens_px = (int(sens["x_start"] * w), int(sens["y_start"] * h), int(sens["x_end"] * w),
                    int(sens["y_end"] * h)) if sens else None
-        damaged = damage_sim.apply(aligned, state["silhouette"], cenario, sens_px)
 
         def measure(img):
             sim = cdm.ChangeDetector()
@@ -1208,7 +1203,42 @@ async def simulate_damage(camera_code: str, cenario: str = Query(..., descriptio
             r["still_learning"] = learning
             return r
 
-        return {"sem_dano": measure(aligned), "com_dano": measure(damaged)}
+        # Base do teste: a imagem ATUAL. Se agora não dá pra comparar (gente
+        # na frente da estátua, câmera fora de posição), usa a imagem de
+        # REFERÊNCIA (estátua livre) — o teste sempre mostra o dano.
+        base, source, why = None, "atual", None
+        M, info = statue_compare.align(ref_gray, cv2.cvtColor(cur, cv2.COLOR_RGB2GRAY), state["area"])
+        if M is None:
+            why = f"a imagem atual não alinhou com a referência ({info.get('reason')})"
+        else:
+            aligned = cv2.warpAffine(cur, M, (w, h))
+            a = measure(aligned)
+            if a.get("success"):
+                base = aligned
+            else:
+                why = (a.get("error") or "comparação indisponível agora").split(" — ")[0]
+        if base is None:
+            base, source = state["reference_frame"], "referencia"
+            a = measure(base)
+        damaged = damage_sim.apply(base, state["silhouette"], cenario, sens_px)
+        b = measure(damaged)
+
+        # Antes/depois com a estátua e o entorno (a imagem da câmera como
+        # ela é, com o dano aplicado), contorno da área comparada em amarelo
+        x1, y1, x2, y2 = state["area"]
+        px, py = int((x2 - x1) * 0.6), int((y2 - y1) * 0.25)
+        cx1, cy1, cx2, cy2 = max(x1 - px, 0), max(y1 - py, 0), min(x2 + px, w), min(y2 + py, h)
+        edge = cv2.morphologyEx(state["silhouette"].astype(np.uint8), cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8)) > 0
+
+        def view(img):
+            v = img.copy()
+            v[edge] = (255, 215, 0)
+            v = v[cy1:cy2, cx1:cx2]
+            _, buf = cv2.imencode(".jpg", cv2.cvtColor(v, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+            return base64.b64encode(buf).decode("utf-8")
+
+        return {"sem_dano": a, "com_dano": b, "source": source, "why": why,
+                "before": view(base), "after": view(damaged)}
 
     res = await run_in_threadpool(run)
     if "error" in res:
@@ -1230,6 +1260,12 @@ async def simulate_damage(camera_code: str, cenario: str = Query(..., descriptio
         "level": level,
         "would_alert": would_alert,
         "still_learning": b.get("still_learning"),
+        # "atual" = dano aplicado na imagem de agora; "referencia" = agora não
+        # dava (motivo em source_reason), usou a imagem de referência
+        "source": res["source"],
+        "source_reason": res["why"],
+        "before_base64": res["before"],
+        "after_base64": res["after"],
         "verdict": (f"DETECTADO: {damage_sim.SCENARIOS[cenario]} gera nível {level} "
                     f"({b['change_percentage']:.1f}% da estátua alterada). Em operação, o alerta sai quando a "
                     f"alteração se mantém por {cdm.SSIM_CONFIRM_CHECKS} comparações seguidas "
