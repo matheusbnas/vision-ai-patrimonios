@@ -34,6 +34,17 @@ from app.services import zone_service
 logger = logging.getLogger(__name__)
 
 _LEVEL_RANK = {"NORMAL": 0, "MODERADO": 1, "ALTO": 2, "CRÍTICO": 3}
+# Folga em volta da figura da estátua (fração da caixa)
+FIGURE_PAD = 0.04
+# Pixel alterado: SSIM local abaixo de 1 - isto (estrutura) ou distância de
+# cor Lab acima disto (tinta), já descontada a variação global de luz
+SSIM_PIXEL_DIFF = 0.45
+COLOR_PIXEL_DIFF = 28.0
+
+
+def _b64(img_rgb: np.ndarray) -> str:
+    _, buf = cv2.imencode(".jpg", cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return base64.b64encode(buf).decode("utf-8")
 
 
 def _zone_rect_px(frame: np.ndarray, camera_code: Optional[str] = None) -> tuple:
@@ -52,9 +63,36 @@ def _zone_rect_px(frame: np.ndarray, camera_code: Optional[str] = None) -> tuple
     return x1, y1, x2, y2
 
 
-def covered_fraction(frame: np.ndarray, camera_code: Optional[str], boxes: Optional[list]) -> float:
+def figure_box_frac(frame: np.ndarray, camera_code: Optional[str], objects: Optional[list]) -> Optional[dict]:
+    """Caixa da FIGURA da estátua (em frações do frame): a detecção que o
+    detector marcou como a própria estátua (is_statue), recortada pelo
+    contorno calibrado e com uma folga pequena. É o que a comparação usa —
+    o contorno calibrado costuma incluir banco, chão e fundo."""
+    statue = [d["bbox"] for d in (objects or []) if d.get("is_statue")]
+    if not statue:
+        return None
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = max(statue, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    cfg = zone_service.get_statue(camera_code)["statue"]
+    if cfg:  # não sai do contorno calibrado
+        x1, y1 = max(x1, int(cfg["x_start"] * w)), max(y1, int(cfg["y_start"] * h))
+        x2, y2 = min(x2, int(cfg["x_end"] * w)), min(y2, int(cfg["y_end"] * h))
+    if x2 - x1 < 16 or y2 - y1 < 16:
+        return None
+    px, py = (x2 - x1) * FIGURE_PAD, (y2 - y1) * FIGURE_PAD
+    return {"x_start": max(x1 - px, 0) / w, "y_start": max(y1 - py, 0) / h,
+            "x_end": min(x2 + px, w) / w, "y_end": min(y2 + py, h) / h}
+
+
+def _frac_px(frac: dict, frame: np.ndarray) -> tuple:
+    h, w = frame.shape[:2]
+    return (int(w * frac["x_start"]), int(h * frac["y_start"]), int(w * frac["x_end"]), int(h * frac["y_end"]))
+
+
+def covered_fraction(frame: np.ndarray, camera_code: Optional[str], boxes: Optional[list],
+                     area: Optional[tuple] = None) -> float:
     """Fração (0-1) da área comparada pelo SSIM coberta pelas caixas dadas."""
-    zx1, zy1, zx2, zy2 = _zone_rect_px(frame, camera_code)
+    zx1, zy1, zx2, zy2 = area or _zone_rect_px(frame, camera_code)
     if not boxes or zx2 <= zx1 or zy2 <= zy1:
         return 0.0
     cover = np.zeros((zy2 - zy1, zx2 - zx1), dtype=np.uint8)
@@ -99,13 +137,24 @@ class ChangeDetector:
         self.change_history: dict[str, list] = {}
 
     def set_reference(self, camera_code: str, frame: np.ndarray,
-                      det_service=None) -> dict:
+                      det_service=None, objects: Optional[list] = None) -> dict:
         """
         Define a imagem de referência do monumento.
-        Extrai o ROI (região da estátua) e armazena.
-        Se det_service for fornecido, também executa HF model.
+
+        A área comparada daqui em diante é a FIGURA da estátua nesta imagem
+        (detecção reconhecida como a estátua, dentro do contorno calibrado).
+        Sem a estátua reconhecida, cai no contorno calibrado inteiro.
+        objects: detecções do YOLO deste frame; se None e houver det_service,
+        roda a detecção aqui.
         """
-        roi = extrair_roi(frame, camera_code)
+        if objects is None and det_service is not None:
+            try:
+                objects = det_service.yolo_detector.detect(frame, camera_code=camera_code, draw=False)["objects"]
+            except Exception as e:
+                logger.warning(f"YOLO na referência: {e}")
+        figure = figure_box_frac(frame, camera_code, objects)
+        area = _frac_px(figure, frame) if figure else _zone_rect_px(frame, camera_code)
+        roi = frame[area[1]:area[3], area[0]:area[2]]
         hf_result = None
         if det_service and det_service.hf_vandalism.model_loaded:
             try:
@@ -115,6 +164,8 @@ class ChangeDetector:
 
         self.monitored[camera_code] = {
             "reference_image": roi,
+            # Área comparada (frações): figura da estátua, ou None = contorno
+            "figure_frac": figure,
             "reference_time": time.time(),
             "last_check": time.time(),
             "last_hf": hf_result,
@@ -129,6 +180,7 @@ class ChangeDetector:
             "camera_code": camera_code,
             "timestamp": time.time(),
             "reference_hf": hf_result,
+            "compared_area": "figura da estátua" if figure else "contorno calibrado",
         }
 
     def check(self, camera_code: str, current_frame: np.ndarray,
@@ -156,12 +208,14 @@ class ChangeDetector:
         ref_data = self.monitored[camera_code]
         ref_img = ref_data["reference_image"]
 
-        # Extrai ROI do frame atual e redimensiona para match
-        zx1, zy1, zx2, zy2 = _zone_rect_px(current_frame, camera_code)
+        # Mesma área da referência: a figura da estátua (ou o contorno)
+        figure = ref_data.get("figure_frac")
+        zx1, zy1, zx2, zy2 = (_frac_px(figure, current_frame) if figure
+                              else _zone_rect_px(current_frame, camera_code))
 
         # Estátua encoberta por gente/veículo: a comparação desse print não
         # é confiável (a diferença seria a pessoa, não a estátua) — pula.
-        covered = covered_fraction(current_frame, camera_code, ignore_boxes)
+        covered = covered_fraction(current_frame, camera_code, ignore_boxes, (zx1, zy1, zx2, zy2))
         if covered >= STATUE_OCCLUSION_SKIP:
             return {
                 "success": False,
@@ -190,9 +244,19 @@ class ChangeDetector:
         gray_cur = cv2.GaussianBlur(gray_cur, (3, 3), 0)
 
         score, ssim_map = ssim(gray_ref, gray_cur, full=True, data_range=255)
-        diff_mask = (1 - ssim_map).astype(np.uint8) * 255
 
-        _, thresh = cv2.threshold(diff_mask, 40, 255, cv2.THRESH_BINARY)  # threshold mais alto
+        # Pixel alterado = ESTRUTURA diferente (peça faltando, quebra, risco:
+        # SSIM local baixo) OU COR diferente (tinta/pichação: a forma pode
+        # continuar igual). A cor desconta a variação global de luz (sol/nuvem).
+        # (Antes: (1 - ssim).astype(uint8) arredondava pra 0/1 antes de
+        # escalar — só pixel com estrutura totalmente invertida contava.)
+        struct_changed = (1 - ssim_map) > SSIM_PIXEL_DIFF
+        lab_ref = cv2.cvtColor(cv2.GaussianBlur(ref_img, (5, 5), 0), cv2.COLOR_RGB2LAB).astype(np.float32)
+        lab_cur = cv2.cvtColor(cv2.GaussianBlur(current_roi, (5, 5), 0), cv2.COLOR_RGB2LAB).astype(np.float32)
+        dlab = lab_cur - lab_ref
+        dlab[..., 0] -= float(np.median(dlab[..., 0]))
+        color_changed = np.sqrt((0.5 * dlab[..., 0]) ** 2 + dlab[..., 1] ** 2 + dlab[..., 2] ** 2) > COLOR_PIXEL_DIFF
+        thresh = ((struct_changed | color_changed).astype(np.uint8)) * 255
         kernel = np.ones((5, 5), np.uint8)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
@@ -404,6 +468,11 @@ class ChangeDetector:
             "ignored_objects_count": ignored_count,
             "ignored_objects_alert": ignored_alert,
             "highlight_image_base64": highlight_b64,
+            # Lado a lado: a mesma área na referência e agora
+            "reference_roi_base64": _b64(ref_img),
+            "current_roi_base64": _b64(current_roi),
+            "compared_area": "figura da estátua" if figure else "contorno calibrado",
+            "reference_time": ref_data.get("reference_time"),
             "history_count": len(self.change_history[camera_code]),
         }
 

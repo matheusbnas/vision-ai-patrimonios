@@ -969,8 +969,10 @@ async def detect_changes(
     # pra excluir essas áreas do cálculo de % alterado — alguém passando ou
     # um carro na rua não pode virar "dano" no monumento
     ignore_boxes = []
+    yolo_objects = None
     try:
         yolo_result = detection_service.yolo_detector.detect(current_frame, camera_code=camera_code)
+        yolo_objects = yolo_result.get("objects", [])
         ignore_boxes = [
             d["bbox"] for d in yolo_result.get("objects", [])
             if d["class_name"] in TRANSIENT_CLASSES and not d.get("is_statue")
@@ -983,7 +985,7 @@ async def detect_changes(
     if camera_code not in change_detector.monitored:
         if covered_fraction(current_frame, camera_code, ignore_boxes) >= 0.05:
             return {"success": False, "error": "Aguardando o monumento ficar livre de pessoas para criar a referência"}
-        change_detector.set_reference(camera_code, current_frame, detection_service)
+        change_detector.set_reference(camera_code, current_frame, detection_service, objects=yolo_objects)
         return {"success": False, "error": "Referência criada — a comparação começa no próximo ciclo"}
 
     result = change_detector.check(camera_code, current_frame, detection_service, ignore_boxes=ignore_boxes)
@@ -1010,6 +1012,10 @@ async def detect_changes(
         "ignored_objects_count": result["ignored_objects_count"],
         "ignored_objects_alert": result["ignored_objects_alert"],
         "highlight_image_base64": result["highlight_image_base64"],
+        "reference_roi_base64": result.get("reference_roi_base64"),
+        "current_roi_base64": result.get("current_roi_base64"),
+        "compared_area": result.get("compared_area"),
+        "reference_time": result.get("reference_time"),
     }
 
 

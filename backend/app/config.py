@@ -199,9 +199,9 @@ STATUE_OCCLUSION_SKIP = 0.4
 # O nível sai do AUMENTO sobre a linha de base (mediana das últimas
 # comparações normais), não do % bruto: sol/sombra mudam o % devagar ao
 # longo do dia e a linha de base acompanha; dano/pichação é um salto.
-SSIM_INCREASE_MODERADO = float(os.getenv("SSIM_INCREASE_MODERADO", "5"))   # pontos percentuais
-SSIM_INCREASE_ALTO = float(os.getenv("SSIM_INCREASE_ALTO", "10"))
-SSIM_INCREASE_CRITICO = float(os.getenv("SSIM_INCREASE_CRITICO", "20"))
+SSIM_INCREASE_MODERADO = float(os.getenv("SSIM_INCREASE_MODERADO", "1.5"))   # pontos percentuais
+SSIM_INCREASE_ALTO = float(os.getenv("SSIM_INCREASE_ALTO", "3"))
+SSIM_INCREASE_CRITICO = float(os.getenv("SSIM_INCREASE_CRITICO", "10"))
 # O salto precisa se repetir em N comparações seguidas cobrindo pelo menos
 # X segundos: gente/sombra passa, peça faltando ou tinta ficam.
 SSIM_CONFIRM_CHECKS = int(os.getenv("SSIM_CONFIRM_CHECKS", "4"))

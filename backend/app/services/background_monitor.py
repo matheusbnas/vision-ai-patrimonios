@@ -91,7 +91,8 @@ def _process_camera(code: str) -> None:
     # faria todo print seguinte parecer "alterado".
     if code not in change_detector.monitored:
         if covered_fraction(frame, code, transient_boxes) < 0.05:
-            change_detector.set_reference(code, frame, detection_service)
+            change_detector.set_reference(code, frame, detection_service,
+                                          objects=result.get("yolo_detection", {}).get("objects", []))
             logger.info(f"[background_monitor] Referência SSIM criada automaticamente para câmera {code}")
     else:
         change_result = change_detector.check(code, frame, detection_service, ignore_boxes=transient_boxes)

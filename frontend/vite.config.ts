@@ -70,6 +70,16 @@ export default defineConfig(async () => {
           target: 'http://localhost:8000',
           changeOrigin: true,
         },
+        // Imagens salvas pelo backend (snapshots, prints com IA, evidências).
+        // Só essas subpastas: /assets/*.js do build do Vite não pode ir pro backend.
+        '/assets/images': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
+        '/assets/evidence': {
+          target: 'http://localhost:8000',
+          changeOrigin: true,
+        },
         '/logo.jpg': {
           target: 'http://localhost:8000',
           changeOrigin: true,

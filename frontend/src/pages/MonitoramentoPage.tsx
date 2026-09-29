@@ -9,6 +9,7 @@ import {
   WifiOff,
   Target,
   Users,
+  X,
 } from 'lucide-react'
 import { api } from '../api/client'
 import { CameraClockOverlay, CameraStatusDot } from '../components/CameraClock'
@@ -103,6 +104,11 @@ interface DetectionFrame {
   change_regions?: number
   significant_changes?: { bbox: number[]; area_percent: number }[]
   highlight_image_base64?: string
+  // Comparação lado a lado: a mesma área (figura da estátua) na referência e agora
+  reference_roi_base64?: string
+  current_roi_base64?: string
+  compared_area?: string
+  reference_time?: number
   hf_prediction?: Record<string, number>
   alert?: {
     level: string
@@ -538,6 +544,10 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
               [code]: {
                 ...existing,
                 highlight_image_base64: data.highlight_image_base64,
+                reference_roi_base64: data.reference_roi_base64,
+                current_roi_base64: data.current_roi_base64,
+                compared_area: data.compared_area,
+                reference_time: data.reference_time,
                 similarity_score: data.similarity_score,
                 change_percentage: data.change_percentage,
                 visible_percentage: data.visible_percentage,
@@ -571,6 +581,14 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
 
   // Salvar a imagem COM as marcações da IA (registro/evidência): grava no
   // servidor (assets/images/<câmera>/..._print_ia_<data>.jpg) e baixa uma cópia
+  // Imagem ampliada (clique nas miniaturas da comparação)
+  const [zoomImage, setZoomImage] = useState<{ src: string; label: string } | null>(null)
+  useEffect(() => {
+    if (!zoomImage) return
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setZoomImage(null)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomImage])
   const [aiSaving, setAiSaving] = useState<Record<string, boolean>>({})
   const [aiSaved, setAiSaved] = useState<Record<string, string>>({})
   const saveAiPrint = async (code: string) => {
@@ -778,6 +796,10 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                         ...prev[code],
                         camera_code: code,
                         highlight_image_base64: data.highlight_image_base64,
+                        reference_roi_base64: data.reference_roi_base64,
+                        current_roi_base64: data.current_roi_base64,
+                        compared_area: data.compared_area,
+                        reference_time: data.reference_time,
                         similarity_score: data.similarity_score,
                         change_percentage: data.change_percentage,
                 visible_percentage: data.visible_percentage,
@@ -1115,13 +1137,15 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                           <div className="min-w-0 flex-1">
                             <p className="text-[9px] font-medium text-gray-500">📸 Snapshot salvo</p>
                             <a
-                              href={`/${frame.snapshot_path}`}
+                              // Caminho vem do Windows (assets\images\...): normaliza as barras.
+                              // ?t= evita abrir a versão em cache — o arquivo é sobrescrito a cada ciclo
+                              href={api.assetUrl(`/${frame.snapshot_path.replace(/\\/g, '/')}?t=${Math.round(frame.timestamp ?? Date.now() / 1000)}`)}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="text-[9px] text-blue-600 hover:text-blue-800 underline truncate block"
                               title={frame.snapshot_path}
                             >
-                              {frame.snapshot_path.split('/').pop()}
+                              {frame.snapshot_path.split(/[\\/]/).pop()}
                             </a>
                           </div>
                         </div>
@@ -1177,8 +1201,29 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
                             </div>
                           </div>
                           <p className="mt-1 text-[9px] text-gray-500 text-center">
-                            Comparação só dentro do contorno calibrado da estátua, sem as pessoas na frente
+                            {frame.compared_area === 'figura da estátua'
+                              ? 'Comparação só na figura da estátua (sem banco, chão e fundo), sem as pessoas na frente'
+                              : 'Comparação no contorno calibrado (estátua não reconhecida na referência), sem as pessoas na frente'}
                           </p>
+                          {frame.reference_roi_base64 && frame.current_roi_base64 && (
+                            <div className="mt-2 grid grid-cols-3 gap-1.5">
+                              {[
+                                { src: frame.reference_roi_base64, label: `Referência${frame.reference_time ? ` · ${new Date(frame.reference_time * 1000).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : ''}` },
+                                { src: frame.current_roi_base64, label: 'Agora' },
+                                { src: frame.highlight_image_base64, label: 'Diferenças (vermelho)' },
+                              ].map((im) => im.src && (
+                                <figure
+                                  key={im.label}
+                                  onClick={() => setZoomImage({ src: `data:image/jpeg;base64,${im.src}`, label: im.label })}
+                                  className="bg-white rounded ring-1 ring-blue-100 overflow-hidden cursor-zoom-in hover:ring-cor-blue"
+                                  title="Clique para ampliar"
+                                >
+                                  <img src={`data:image/jpeg;base64,${im.src}`} alt={im.label} className="w-full h-28 object-contain bg-black" />
+                                  <figcaption className="text-[8px] text-gray-500 text-center py-0.5">{im.label}</figcaption>
+                                </figure>
+                              ))}
+                            </div>
+                          )}
                           {frame.confirmation && (
                             <p className="mt-1 text-[9px] text-gray-600 text-center">
                               {frame.confirmation.increase_pct >= 0.1
@@ -1263,6 +1308,26 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
 
       {calibratingCode && (
         <ZoneCalibrator cameraCode={calibratingCode} onClose={() => setCalibratingCode(null)} />
+      )}
+
+      {/* Imagem ampliada — fecha no clique fora, no X ou com Esc */}
+      {zoomImage && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 cursor-zoom-out"
+          onClick={() => setZoomImage(null)}
+        >
+          <figure className="relative max-w-5xl w-full" onClick={(e) => e.stopPropagation()}>
+            <img src={zoomImage.src} alt={zoomImage.label} className="w-full max-h-[85vh] object-contain rounded-lg bg-black" />
+            <figcaption className="mt-2 text-center text-sm text-white/90">{zoomImage.label}</figcaption>
+            <button
+              onClick={() => setZoomImage(null)}
+              className="absolute -top-3 -right-3 p-1.5 rounded-full bg-white text-gray-700 shadow hover:bg-gray-100"
+              title="Fechar (Esc)"
+            >
+              <X size={16} />
+            </button>
+          </figure>
+        </div>
       )}
     </div>
   )
