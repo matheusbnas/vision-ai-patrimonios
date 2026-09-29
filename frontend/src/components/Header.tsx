@@ -3,6 +3,7 @@ import { PanelLeftClose, PanelLeftOpen, Cpu, ChevronDown } from 'lucide-react'
 import { api } from '../api/client'
 import type { Page } from '../types'
 import AlertNotifier from './AlertNotifier'
+import LiveClock from './LiveClock'
 import logoCor from '../assets/logo-cor-branco.png'
 
 const pageTitles: Record<Page, string> = {
@@ -83,6 +84,9 @@ export default function Header({ currentPage, sidebarVisible, onToggleSidebar, o
       </div>
 
       <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
+        {/* Data e hora oficial (Brasília) — referência para os horários das câmeras */}
+        <LiveClock />
+
         {/* Status da API */}
         <div
           className={`hidden md:flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium ring-1 ${

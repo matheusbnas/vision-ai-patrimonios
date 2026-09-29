@@ -55,3 +55,72 @@
   width: 100%;
   border-radius: 0.5rem;
 }
+
+/* ─── Mapa de câmeras ─────────────────────────────────────────── */
+.map-icon {
+  background: transparent;
+  border: none;
+}
+.map-patrimony {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 9999px;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  background: #1e3a5f;
+  border: 3px solid #fff;
+  box-shadow: 0 4px 12px rgb(15 23 42 / 0.35);
+}
+.map-cam {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 9999px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 6px rgb(15 23 42 / 0.3);
+}
+.map-cam--dedicated { background: #c9a84c; }
+.map-cam--nearby { background: #16a34a; }
+.map-cam--alert { background: #dc2626; }
+.map-cam--idle {
+  background: #94a3b8;
+  border-width: 1.5px;
+  box-shadow: none;
+}
+.map-pulse {
+  position: absolute;
+  inset: -6px;
+  border-radius: 9999px;
+  background: rgb(220 38 38 / 0.45);
+  animation: map-pulse 1.6s ease-out infinite;
+  z-index: -1;
+}
+@keyframes map-pulse {
+  from { transform: scale(0.7); opacity: 1; }
+  to { transform: scale(1.6); opacity: 0; }
+}
+.map-cluster {
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: #334155;
+  background: rgb(255 255 255 / 0.92);
+  border: 2px solid #94a3b8;
+  box-shadow: 0 2px 6px rgb(15 23 42 / 0.2);
+}
+.map-legend-dot {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+}

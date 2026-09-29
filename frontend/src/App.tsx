@@ -12,6 +12,8 @@ import type { Page } from './types'
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
+  // Câmeras enviadas pelo Mapa para abrir (e já iniciar) no Monitoramento
+  const [monitorCodes, setMonitorCodes] = useState<string[] | null>(null)
   const isMobile = useIsMobile()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readPref('sidebar:collapsed', false))
   const [sidebarHidden, setSidebarHidden] = useState(() => readPref('sidebar:hidden', false))
@@ -43,6 +45,7 @@ export default function App() {
   }, [toggleSidebar])
 
   const handleNavigate = (page: Page) => {
+    setMonitorCodes(null)
     setCurrentPage(page)
     if (isMobile) setMobileOpen(false)
   }
@@ -56,11 +59,18 @@ export default function App() {
       case 'patrimonios':
         return <PatrimoniosPage />
       case 'mapa':
-        return <MapaPage />
+        return (
+          <MapaPage
+            onMonitor={(codes) => {
+              setMonitorCodes(codes)
+              setCurrentPage('monitoramento')
+            }}
+          />
+        )
       case 'vandalismo':
         return <VandalismoPage />
       case 'monitoramento':
-        return <MonitoramentoPage />
+        return <MonitoramentoPage initialCodes={monitorCodes ?? undefined} autoStart={!!monitorCodes} />
       case 'sobre':
         return <SobrePage />
       default:

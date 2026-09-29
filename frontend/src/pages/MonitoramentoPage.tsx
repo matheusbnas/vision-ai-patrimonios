@@ -11,6 +11,7 @@ import {
   Users,
 } from 'lucide-react'
 import { api } from '../api/client'
+import { CameraClockOverlay, CameraStatusDot } from '../components/CameraClock'
 import type { Patrimonio } from '../types'
 import ZoneCalibrator from '../components/ZoneCalibrator'
 import CameraStreamView from '../components/CameraStreamView'
@@ -221,9 +222,16 @@ function CameraCodeGroup({
   )
 }
 
-export default function MonitoramentoPage() {
+interface MonitoramentoProps {
+  /** Câmeras pré-selecionadas (ex.: perímetro enviado pelo Mapa) */
+  initialCodes?: string[]
+  /** Já inicia o ciclo de monitoramento com as câmeras pré-selecionadas */
+  autoStart?: boolean
+}
+
+export default function MonitoramentoPage({ initialCodes, autoStart = false }: MonitoramentoProps = {}) {
   const [patrimonios, setPatrimonios] = useState<Patrimonio[]>([])
-  const [selectedCodes, setSelectedCodes] = useState<string[]>([])
+  const [selectedCodes, setSelectedCodes] = useState<string[]>(() => initialCodes ?? [])
   const [streamUrls, setStreamUrls] = useState<Record<string, string>>({})
   // URL HLS por câmera (protocolo real da conta na Tixxi) — quando disponível,
   // usa o player <video>+hls.js em vez do iframe WebRTC.
@@ -268,13 +276,21 @@ export default function MonitoramentoPage() {
   // velha no player ao vivo deixava "fantasmas" de quem já tinha passado.
   // code → FPS da análise (só as que estão ao vivo)
   const [liveCams, setLiveCams] = useState<Record<string, number>>({})
+  // code → instante (ms) do último frame analisado no servidor, para o selo de data/hora
+  const [liveFrameTs, setLiveFrameTs] = useState<Record<string, number>>({})
   const [liveTick, setLiveTick] = useState(0)
   useEffect(() => {
     const load = async () => {
       try {
         const data = await api.getLiveStatus()
         const analysisFps: Record<string, number> = {}
-        for (const a of data.analysis ?? []) analysisFps[a.camera_code] = a.analysis_fps
+        const frameTs: Record<string, number> = {}
+        const fetchedAt = Date.now()
+        for (const a of data.analysis ?? []) {
+          analysisFps[a.camera_code] = a.analysis_fps
+          if (a.last_analysis_age_s != null) frameTs[a.camera_code] = fetchedAt - a.last_analysis_age_s * 1000
+        }
+        setLiveFrameTs(frameTs)
         const next: Record<string, number> = {}
         for (const c of data.cameras ?? []) {
           if (c.state === 'ao vivo') next[c.camera_code] = analysisFps[c.camera_code] ?? 0
@@ -282,6 +298,7 @@ export default function MonitoramentoPage() {
         setLiveCams(next)
       } catch {
         setLiveCams({})
+        setLiveFrameTs({})
       }
     }
     load()
@@ -558,6 +575,16 @@ export default function MonitoramentoPage() {
     }
   }, [])
 
+  // Vindo do Mapa ("Monitorar perímetro"): inicia o ciclo uma única vez
+  const autoStartedRef = useRef(false)
+  useEffect(() => {
+    if (!autoStart || autoStartedRef.current || selectedCodes.length === 0) return
+    autoStartedRef.current = true
+    runningRef.current = true
+    setRunning(true)
+    runAutoScanLoop()
+  }, [autoStart, selectedCodes, runAutoScanLoop])
+
   const getAlertColor = (level?: string) => {
     switch (level) {
       case 'CRÍTICO': return 'bg-red-600 text-white'
@@ -761,6 +788,17 @@ export default function MonitoramentoPage() {
                 // Presença contínua (loitering) é só informativa — não pinta o cabeçalho
                 const hasAlert = frame?.alert != null || frame?.risk_alert != null
                   || frame?.interaction_alert != null || frame?.surface_alert != null
+                // Data/hora + situação da imagem exibida neste quadrante
+                const clockInput = code in liveCams
+                  ? { mode: 'live-analysis' as const, imageTs: liveFrameTs[code] ?? null }
+                  : viewMode === 'snapshot'
+                    ? {
+                        mode: 'snapshot' as const,
+                        imageTs: frame?.image_base64 ? frame.timestamp * 1000 : null,
+                        running,
+                        captureFailed: !!frame?.stale || frame?.frame_captured === false,
+                      }
+                    : { mode: 'player' as const, error: !!streamErrors[code] }
                 const surfaceEvent = frame?.surface_event
                   && Date.now() - frame.surface_event.timestamp * 1000 < SURFACE_EVENT_VISIBLE_MS
                   ? frame.surface_event : null
@@ -811,7 +849,7 @@ export default function MonitoramentoPage() {
                         >
                           {snapshots[code]?.loading ? '⏳' : '📸'} Print
                         </button>
-                        {running && <span className="status-dot online" />}
+                        <CameraStatusDot {...clockInput} />
                         {frame?.processing_time_ms != null && (
                           <span className="opacity-60 text-[10px]">
                             {frame.processing_time_ms.toFixed(0)}ms
@@ -929,14 +967,14 @@ export default function MonitoramentoPage() {
                             🔴 AO VIVO
                           </span>
                         ) : frame?.image_base64 && (
-                          <span className={`text-white text-[10px] px-2 py-0.5 rounded font-bold shadow-lg ${
-                            frame.stale ? 'bg-gray-600' : 'bg-gray-900/80'
-                          }`}>
-                            📷 {new Date(frame.timestamp * 1000).toLocaleTimeString('pt-BR')}
-                            {frame.stale && ' · desatualizado'}
+                          <span className="bg-gray-900/80 text-white text-[10px] px-2 py-0.5 rounded font-bold shadow-lg">
+                            📷 PRINT + IA
                           </span>
                         )}
                       </div>
+
+                      {/* Data/hora da imagem + se está em dia, atrasada ou sem sinal */}
+                      <CameraClockOverlay {...clockInput} />
                     </div>
 
                     {/* Painel de análise - SSIM + HF */}
