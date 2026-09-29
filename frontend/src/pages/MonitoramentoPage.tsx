@@ -243,6 +243,9 @@ function CameraCodeGroup({
 }
 
 // Danos simulados disponíveis no teste (mesmos ids de backend/app/services/damage_sim.py)
+// Acima disto (vindo do Mapa), abre em Prints (IA) em vez de vídeo ao vivo
+const MAX_LIVE_PLAYERS = 4
+
 const SIM_SCENARIOS = [
   { id: 'pichacao', label: 'Pichação (spray)' },
   { id: 'tinta', label: 'Tinta jogada' },
@@ -309,14 +312,23 @@ export default function MonitoramentoPage({ initialCodes, autoStart = false }: M
   // capturado pelo backend a cada ciclo — o navegador não mantém conexão
   // aberta com a câmera, então não há player caindo/ficando preto.
   // "live": player ao vivo embutido (HLS/iframe), como antes.
+  // Vindo do Mapa com várias câmeras: abre em Prints (IA) — 10 players de
+  // vídeo ao mesmo tempo travam o navegador. Não grava como preferência.
+  const openedFromMapMany = (initialCodes?.length ?? 0) > MAX_LIVE_PLAYERS
   const [viewMode, setViewMode] = useState<'snapshot' | 'live'>(() => {
+    if (openedFromMapMany) return 'snapshot'
     try {
       return localStorage.getItem('monitoramento.viewMode') === 'live' ? 'live' : 'snapshot'
     } catch {
       return 'snapshot'
     }
   })
+  const viewModeTouched = useRef(!openedFromMapMany)
   useEffect(() => {
+    if (!viewModeTouched.current) {
+      viewModeTouched.current = true
+      return
+    }
     try { localStorage.setItem('monitoramento.viewMode', viewMode) } catch {}
   }, [viewMode])
 

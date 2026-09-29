@@ -16,8 +16,9 @@ import {
 import { api } from '../api/client'
 import type { Camera, Patrimonio } from '../types'
 
-// Limite de câmeras por ciclo no /api/monitor/multi (MAX_BATCH_CAMERAS no backend)
-const MAX_MONITOR_CAMERAS = 16
+// Máximo de câmeras abertas de uma vez pelo "Monitorar perímetro" (mais que
+// isso deixa o navegador e a captura no servidor pesados demais)
+const MAX_MONITOR_CAMERAS = 10
 // Janela em que um alerta ainda "acende" o perímetro no mapa
 const ALERT_WINDOW_S = 30 * 60
 const RIO_CENTER: [number, number] = [-22.9068, -43.1729]
@@ -370,8 +371,10 @@ export default function MapaPage({ onMonitor }: Props) {
       <div className="relative flex-1 min-h-[320px] rounded-xl overflow-hidden shadow-sm ring-1 ring-slate-200">
         <MapContainer center={RIO_CENTER} zoom={12} className="h-full w-full" scrollWheelZoom>
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+            // OpenStreetMap padrão: não exige chave (a CARTO passou a pedir API key)
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            maxZoom={19}
           />
           <MapFocus target={selected?.patrimonio ?? null} radius={radius} all={patrimoniosForBounds} />
 
@@ -561,7 +564,7 @@ function PerimeterDetail({
       </button>
       {cameras.length + dedicatedWithoutCoords.length > MAX_MONITOR_CAMERAS && (
         <p className="text-[11px] text-slate-400 -mt-1">
-          Limite de {MAX_MONITOR_CAMERAS} por ciclo: entram as fixas e as mais próximas.
+          Abre no máximo {MAX_MONITOR_CAMERAS} câmeras: entram as fixas e as mais próximas.
         </p>
       )}
 
