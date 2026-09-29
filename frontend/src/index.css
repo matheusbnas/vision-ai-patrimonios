@@ -5,6 +5,26 @@
 @layer base {
   body {
     @apply antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+
+  /* Scrollbars discretas */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.slate.300') transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 rounded-full;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-400;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
   }
 }
 
@@ -20,6 +40,13 @@
   }
   .status-dot.warning {
     @apply bg-yellow-500;
+  }
+
+  .sidebar-scroll {
+    scrollbar-color: rgb(255 255 255 / 0.15) transparent;
+  }
+  .sidebar-scroll::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 0.15);
   }
 }
 
